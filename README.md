@@ -10,8 +10,6 @@
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9+-cba6f7?style=flat-square">
   <img alt="Shell" src="https://img.shields.io/badge/shell-bash%20%7C%20zsh-89b4fa?style=flat-square">
   <img alt="fzf" src="https://img.shields.io/badge/picker-fzf-fab387?style=flat-square">
-  <img alt="Single file" src="https://img.shields.io/badge/deps-stdlib%20only-94e2d5?style=flat-square">
-  <img alt="Theme" src="https://img.shields.io/badge/theme-Catppuccin%20Mocha-f5c2e7?style=flat-square">
   <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-a6e3a1?style=flat-square">
 </p>
 
