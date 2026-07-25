@@ -80,7 +80,7 @@ No third-party Python packages are required.
 
 ```bash
 # grab the script, name it tzc, make it executable, and put it on your PATH
-curl -o tzc https://raw.githubusercontent.com/gavinofelix/tzc/main/tzc
+curl -o tzc https://raw.githubusercontent.com/bytebeast/tzc/main/tzc
 chmod +x tzc
 mv tzc ~/.local/bin/    # or anywhere on your PATH, e.g. /usr/local/bin
 
