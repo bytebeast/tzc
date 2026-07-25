@@ -214,28 +214,6 @@ equivalent, the Unix epoch, and a friendly relative time.
 
 ---
 
-## GitHub topics
-
-Add these to the repo (Settings, or the gear next to "About") to help people
-find it:
-
-```
-timezone timezone-converter timezones datetime cli cli-tool command-line-tool
-python python3 fzf terminal devops sre sysadmin logs log-analysis
-unix-timestamp epoch iso8601 catppuccin
-```
-
----
-
-## Social preview
-
-A ready-to-use 1280x640 preview image lives at
-[`images/social-preview.png`](images/social-preview.png). Upload it under
-**Settings > General > Social preview** so links to the repo render nicely in
-chat and social feeds.
-
----
-
 ## License
 
 [MIT](LICENSE)
