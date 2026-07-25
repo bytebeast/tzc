@@ -1,6 +1,6 @@
 <!-- Set this image as your repo's social preview: Settings > General > Social preview -->
 <p align="center">
-  <img src="images/social-preview.png" alt="tzc - paste a timestamp, get your time" width="640">
+  <img src="images/tzc-social-preview.png" alt="tzc - paste a timestamp, get your time" width="640">
 </p>
 
 <h1 align="center">tzc</h1>
