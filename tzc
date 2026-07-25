@@ -1,0 +1,558 @@
+#!/usr/bin/env python3
+"""
+tzconvert.py
+============
+
+Interactively:
+  1. Ask you for a date/time string (auto-detects ~10 common formats).
+  2. Let you pick a target timezone with fzf.
+  3. Print the time you entered, the converted time, and a human-readable
+     "2 days, 4 hours, 5 minutes ago" style relative time.
+
+Recognized input formats
+------------------------
+  YYYY-MM-DD HH:MM:SS              SQL databases, apps          (naive)
+  YYYY-MM-DDTHH:MM:SSZ             APIs, Kubernetes             (UTC)
+  YYYY-MM-DDTHH:MM:SS.sssZ         cloud-native apps            (UTC)
+  YYYY-MM-DDTHH:MM:SS±HH:MM        ISO-8601 with timezone
+  Mon DD HH:MM:SS                  Linux syslog                 (naive, year assumed)
+  Mon DD HH:MM:SS.sss              systemd, Java                (naive, year assumed)
+  1721831718                       Unix epoch seconds
+  1721831718123                    Unix epoch milliseconds
+  1721831718123456789              Unix epoch nanoseconds
+  24/Jul/2026:14:35:18 +0000       Apache / Nginx access log
+  31 days, 4 hours, 25 minutes ago human-readable relative time (past)
+  in 3 hours, 12 minutes           human-readable relative time (future)
+
+Relative expressions are resolved against "now". Use an "... ago" suffix for the
+past, an "in ..." prefix (or "... from now") for the future; with no marker,
+"ago" is assumed. Recognized units: seconds, minutes, hours, days, weeks,
+months, years (and common short forms like sec/min/hr/d/wk/mo/yr). "now" and
+"just now" resolve to the current instant.
+
+Naive timestamps (no timezone in the string) are assumed to be in your LOCAL
+timezone by default; override with --from "Region/City" (e.g. --from UTC).
+
+Dependencies
+------------
+  * Python 3.9+ (uses the stdlib zoneinfo module).
+  * fzf on your PATH for interactive timezone picking. If fzf is missing, or
+    you pass --to, the script falls back to a plain text prompt / that value.
+  * On some minimal Linux installs you may need the IANA tz database:
+        pip install tzdata     (only if zoneinfo can't find zones)
+"""
+
+import argparse
+import re
+import subprocess
+import sys
+from datetime import UTC, datetime, timedelta
+
+try:
+    from zoneinfo import ZoneInfo, available_timezones
+except ImportError:  # Python < 3.9
+    print("This script needs Python 3.9+ (zoneinfo).", file=sys.stderr)
+    sys.exit(1)
+
+import os
+
+# ============================================================
+# Catppuccin (Mocha) color scheme
+# ============================================================
+# 24-bit truecolor ANSI codes. Colors are disabled automatically when output is
+# not a terminal, when NO_COLOR is set, or when --no-color is passed, so piped
+# output stays clean.
+_CATPPUCCIN = {
+    "rosewater": (245, 224, 220),
+    "pink": (245, 194, 231),
+    "mauve": (203, 166, 247),
+    "red": (243, 139, 168),
+    "peach": (250, 179, 135),
+    "yellow": (249, 226, 175),
+    "green": (166, 227, 161),
+    "teal": (148, 226, 213),
+    "sky": (137, 220, 235),
+    "blue": (137, 180, 250),
+    "lavender": (180, 190, 254),
+    "text": (205, 214, 244),
+    "subtext": (166, 173, 200),
+    "surface": (88, 91, 112),
+}
+
+COLOR_ENABLED = True  # toggled in main() based on tty / flags
+
+
+def paint(text, color, bold=False):
+    """Wrap `text` in a Catppuccin truecolor ANSI code (no-op if disabled)."""
+    if not COLOR_ENABLED or color not in _CATPPUCCIN:
+        return text
+    r, g, b = _CATPPUCCIN[color]
+    prefix = ("\033[1m" if bold else "") + f"\033[38;2;{r};{g};{b}m"
+    return f"{prefix}{text}\033[0m"
+
+
+# ============================================================
+# Parsing
+# ============================================================
+# Common timezone abbreviations -> fixed numeric offsets. strptime's %Z only
+# understands UTC/GMT/local, so we translate abbreviations to offsets ourselves
+# before parsing. NOTE: some abbreviations are ambiguous (e.g. IST, CST); the
+# mapping below picks the most common meaning. For anything critical, feed an
+# explicit numeric offset instead.
+TZ_ABBREV = {
+    "UTC": "+0000",
+    "GMT": "+0000",
+    "Z": "+0000",
+    "EST": "-0500",
+    "EDT": "-0400",
+    "CST": "-0600",
+    "CDT": "-0500",
+    "MST": "-0700",
+    "MDT": "-0600",
+    "PST": "-0800",
+    "PDT": "-0700",
+    "BST": "+0100",
+    "CET": "+0100",
+    "CEST": "+0200",
+    "EET": "+0200",
+    "EEST": "+0300",
+    "IST": "+0530",
+    "JST": "+0900",
+    "KST": "+0900",
+    "AEST": "+1000",
+    "AEDT": "+1100",
+    "NZST": "+1200",
+}
+
+# strptime patterns tried in order. %z handles ±HH:MM and +0000 offsets.
+STRPTIME_FORMATS = [
+    "%Y-%m-%d %H:%M:%S",  # SQL:            2026-07-24 14:35:18
+    "%Y-%m-%d %H:%M:%S.%f",  # SQL w/ millis
+    "%Y-%m-%dT%H:%M:%S%z",  # ISO w/ offset:  ...T14:35:18+00:00 / ...Z (normalized below)
+    "%Y-%m-%dT%H:%M:%S.%f%z",  # ISO w/ millis+offset
+    "%Y-%m-%dT%H:%M:%S",  # ISO, no zone
+    "%Y-%m-%dT%H:%M:%S.%f",  # ISO w/ millis, no zone
+    "%d/%b/%Y:%H:%M:%S %z",  # Apache/Nginx:   24/Jul/2026:14:35:18 +0000
+    "%a %b %d %H:%M:%S %z %Y",  # `date` cmd:     Fri Jul 24 07:19:59 UTC 2026 (abbrev->offset)
+    "%a %b %d %H:%M:%S %Y",  # ctime/`date`:   Fri Jul 24 07:19:59 2026 (no zone)
+    "%b %d %H:%M:%S %z %Y",  # date, no weekday
+    "%b %d %H:%M:%S %Y",
+    "%b %d %H:%M:%S",  # syslog:         Jul 24 14:35:18   (no year)
+    "%b %d %H:%M:%S.%f",  # systemd/Java:   Jul 24 14:35:18.123
+]
+
+
+def normalize_input(s):
+    """
+    Prepare a raw string for parsing:
+      * turn a trailing 'Z' into an explicit +00:00 offset, and
+      * replace standalone timezone abbreviations (UTC, PDT, JST, ...) with
+        their numeric offsets so %z can read them.
+    """
+    if s.endswith("Z") and "T" in s:  # ISO Zulu, e.g. 2026-07-24T14:35:18Z
+        s = s[:-1] + "+00:00"
+    # Replace whole-word tz abbreviations only (leaves month names etc. alone).
+    tokens = [TZ_ABBREV.get(tok, tok) for tok in s.split(" ")]
+    return " ".join(tokens)
+
+
+# Human-readable relative time, e.g. "31 days, 4 hours, 25 minutes ago".
+# Each unit spelling (including common short forms) maps to a number of seconds.
+# Note: months/years use fixed averages (30 / 365 days), so they are approximate.
+_REL_UNIT_SECONDS = {
+    "second": 1,
+    "seconds": 1,
+    "sec": 1,
+    "secs": 1,
+    "s": 1,
+    "minute": 60,
+    "minutes": 60,
+    "min": 60,
+    "mins": 60,
+    "m": 60,
+    "hour": 3600,
+    "hours": 3600,
+    "hr": 3600,
+    "hrs": 3600,
+    "h": 3600,
+    "day": 86400,
+    "days": 86400,
+    "d": 86400,
+    "week": 604800,
+    "weeks": 604800,
+    "wk": 604800,
+    "wks": 604800,
+    "w": 604800,
+    "month": 2592000,
+    "months": 2592000,
+    "mo": 2592000,
+    "mos": 2592000,
+    "mon": 2592000,
+    "mons": 2592000,
+    "year": 31536000,
+    "years": 31536000,
+    "yr": 31536000,
+    "yrs": 31536000,
+    "y": 31536000,
+}
+
+# One "<number> <unit>" chunk, e.g. "31 days" or "25 minutes".
+_REL_TOKEN = re.compile(r"(\d+(?:\.\d+)?)\s*([a-z]+)")
+
+
+def parse_relative(s, now):
+    """
+    Parse a human-readable relative expression into an aware datetime, or return
+    None if `s` is not one (so the caller can try other formats).
+
+    Examples that parse:
+        "31 days, 4 hours, 25 minutes ago"   -> now minus that span
+        "in 3 hours, 12 minutes"             -> now plus that span
+        "5 minutes ago"  /  "2 weeks ago"    -> past
+        "now" / "just now"                   -> now
+
+    Direction: a trailing "ago" means past; a leading "in " (or trailing
+    "from now" / "hence") means future; with no marker, past is assumed.
+    """
+    text = s.strip().lower()
+    if text in ("now", "just now"):
+        return now, "parsed as relative time (now)"
+
+    # Pull off the direction marker, if any.
+    future = None
+    if text.endswith(" ago"):
+        future, text = False, text[:-4]
+    elif text.startswith("in "):
+        future, text = True, text[3:]
+    elif text.endswith(" from now"):
+        future, text = True, text[: -len(" from now")]
+    elif text.endswith(" hence"):
+        future, text = True, text[: -len(" hence")]
+
+    matches = _REL_TOKEN.findall(text)
+    if not matches:
+        return None
+
+    total = 0.0
+    for num, unit in matches:
+        if unit not in _REL_UNIT_SECONDS:
+            return None  # an unrecognized unit means this isn't a clean relative expr
+        total += float(num) * _REL_UNIT_SECONDS[unit]
+
+    # With no explicit direction, only accept if the whole string was relative
+    # tokens (plus commas / "and" / whitespace); otherwise defer to other parsers.
+    if future is None:
+        leftover = _REL_TOKEN.sub("", text).replace(",", " ").replace(" and ", " ")
+        if leftover.strip():
+            return None
+        future = False  # default to "ago"
+
+    dt = now + timedelta(seconds=total) if future else now - timedelta(seconds=total)
+    return dt, f"parsed as relative time ({human_delta(dt, now)})"
+
+
+# Epoch magnitude thresholds by digit length of the integer part.
+#   <=10 -> seconds, 11-13 -> milliseconds, 14-16 -> microseconds, 17+ -> nanoseconds
+def _parse_epoch(s):
+    """Return an aware UTC datetime if `s` looks like a Unix epoch, else None."""
+    t = s.strip()
+    neg = t.startswith("-")
+    core = t[1:] if neg else t
+    # allow a single decimal point (fractional epoch seconds)
+    if not core.replace(".", "", 1).isdigit():
+        return None
+
+    if "." in core:
+        # fractional value is always interpreted as SECONDS
+        seconds = float(t)
+    else:
+        digits = len(core)
+        value = int(t)
+        if digits <= 10:
+            seconds = value
+        elif digits <= 13:
+            seconds = value / 1_000
+        elif digits <= 16:
+            seconds = value / 1_000_000
+        else:
+            seconds = value / 1_000_000_000
+    return datetime.fromtimestamp(seconds, tz=UTC)
+
+
+def parse_datetime(s, default_tz):
+    """
+    Parse `s` into a timezone-aware datetime.
+
+    - Epoch numbers -> UTC.
+    - Strings carrying an offset/Z -> that zone.
+    - Naive strings -> `default_tz` (your local zone unless overridden).
+    - Year-less syslog formats -> current year is assumed.
+
+    Returns (aware_datetime, note) where `note` describes any assumption made.
+    """
+    s = s.strip()
+
+    # 1) Epoch?
+    epoch = _parse_epoch(s)
+    if epoch is not None:
+        return epoch, "parsed as Unix epoch (UTC)"
+
+    # 1b) Human-readable relative expression, e.g. "31 days, 4 hours ago"?
+    #     Resolved against "now" in the source timezone so the entered time is
+    #     expressed there before conversion.
+    rel = parse_relative(s, datetime.now(default_tz))
+    if rel is not None:
+        return rel
+
+    # 2) Normalize trailing 'Z' and timezone abbreviations to numeric offsets.
+    norm = normalize_input(s)
+
+    # Try the fast stdlib ISO parser first (very permissive on 3.11+).
+    try:
+        dt = datetime.fromisoformat(norm)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=default_tz), f"naive input; assumed {default_tz}"
+        return dt, "parsed with explicit timezone"
+    except ValueError:
+        pass
+
+    # 3) Fall back to the explicit strptime patterns.
+    for fmt in STRPTIME_FORMATS:
+        yearless = "%Y" not in fmt
+        # Inject the current year for year-less formats. This both fills in the
+        # missing year AND avoids the Python 3.15 DeprecationWarning about
+        # parsing a day-of-month with no year.
+        use_fmt = ("%Y " + fmt) if yearless else fmt
+        use_str = f"{datetime.now().year} {norm}" if yearless else norm
+        try:
+            dt = datetime.strptime(use_str, use_fmt)
+        except ValueError:
+            continue
+
+        note_parts = []
+        if yearless:
+            note_parts.append("year assumed = current year")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=default_tz)
+            note_parts.append(f"naive input; assumed {default_tz}")
+        else:
+            note_parts.append("parsed with explicit timezone")
+        return dt, "; ".join(note_parts)
+
+    raise ValueError(f"Could not parse date string: {s!r}")
+
+
+# ============================================================
+# Timezone selection
+# ============================================================
+def zone_abbreviations(zone):
+    """
+    Return the abbreviation(s) a zone uses, e.g. 'EST/EDT' or 'IST'. We sample
+    January and July so both the standard and daylight-saving names show up.
+    Numeric-offset zones report things like '+0530' or '-03'.
+    """
+    year = datetime.now().year
+    names = []
+    try:
+        tz = ZoneInfo(zone)
+        for base in (datetime(year, 1, 1, 12), datetime(year, 7, 1, 12)):
+            nm = base.replace(tzinfo=tz).tzname()
+            if nm and nm not in names:
+                names.append(nm)
+    except Exception:
+        pass
+    return "/".join(names)
+
+
+def zone_offset_label(zone):
+    """
+    Current UTC offset for a zone as a compact label, e.g. '+7h', '-8h',
+    '+5:30', '+9:45'. Uses 'now' so it reflects daylight saving where active.
+    """
+    try:
+        off = datetime.now(ZoneInfo(zone)).utcoffset()
+    except Exception:
+        return ""
+    if off is None:
+        return ""
+    total = int(off.total_seconds())
+    sign = "+" if total >= 0 else "-"
+    total = abs(total)
+    hours, minutes = total // 3600, (total % 3600) // 60
+    return f"{sign}{hours}:{minutes:02d}" if minutes else f"{sign}{hours}h"
+
+
+def build_zone_lines():
+    """
+    Build 'Region/City   ABBR/ABBR   +offset' lines for fzf. Abbreviation and
+    UTC offset are on the same line, so a search like 'IST' surfaces every zone
+    that uses it (Asia/Kolkata, Europe/Dublin, Asia/Jerusalem, ...) and you can
+    also eyeball / search the offset (e.g. '-8h') to pick the right one.
+    """
+    lines = []
+    for zone in sorted(available_timezones()):
+        abbr = zone_abbreviations(zone)
+        offset = zone_offset_label(zone)
+        lines.append(f"{zone:<32}{abbr:<12}{offset}")
+    return lines
+
+
+def pick_timezone_with_fzf():
+    """Pipe the annotated IANA timezone list into fzf; return the chosen zone."""
+    lines = "\n".join(build_zone_lines())
+    try:
+        proc = subprocess.run(
+            [
+                "fzf",
+                "--prompt=Convert to timezone (try an abbrev like IST)> ",
+                "--height=60%",
+                "--reverse",
+                "--border",
+                # Search across the whole line so both zone name AND abbrev match.
+                "--nth=1..",
+                "--tiebreak=begin",
+                "--header=Type a zone name or an abbreviation (EST, PDT, IST, JST...)",
+            ],
+            input=lines,
+            text=True,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        return None  # fzf not installed -> caller falls back to a text prompt
+    choice = proc.stdout.strip()
+    if not choice:
+        return None
+    # The zone name is the first whitespace-delimited token (IANA names have no
+    # spaces); the rest of the line is just the abbreviation annotation.
+    return choice.split()[0]
+
+
+def resolve_target_tz(cli_value):
+    """
+    Decide the target timezone:
+      --to given  -> use it directly (no fzf).
+      else        -> fzf picker.
+      fzf missing -> plain text prompt.
+    """
+    if cli_value:
+        return ZoneInfo(cli_value)
+
+    choice = pick_timezone_with_fzf()
+    if choice is None:
+        choice = input("Target timezone (e.g. America/New_York): ").strip()
+    return ZoneInfo(choice)
+
+
+# ============================================================
+# Human-readable relative time
+# ============================================================
+def human_delta(then, now=None):
+    """
+    Render the gap between `then` and `now` as e.g.
+    '2 days, 4 hours, 5 minutes ago' or 'in 3 hours, 12 minutes'.
+    Shows the three most-significant non-zero units.
+    """
+    now = now or datetime.now(UTC)
+    seconds = (now - then).total_seconds()
+    future = seconds < 0
+    seconds = abs(int(round(seconds)))
+
+    if seconds < 1:
+        return "just now"
+
+    units = [
+        ("year", 365 * 24 * 3600),
+        ("day", 24 * 3600),
+        ("hour", 3600),
+        ("minute", 60),
+        ("second", 1),
+    ]
+    parts = []
+    for name, size in units:
+        qty, seconds = divmod(seconds, size)
+        if qty:
+            parts.append(f"{qty} {name}{'s' if qty != 1 else ''}")
+    parts = parts[:3]  # keep it readable
+    phrase = ", ".join(parts)
+    return f"in {phrase}" if future else f"{phrase} ago"
+
+
+# ============================================================
+# Main
+# ============================================================
+def local_tz():
+    """The system's local timezone as a tzinfo (with a real name if possible)."""
+    return datetime.now().astimezone().tzinfo
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("date", nargs="?", help="Date string (prompted if omitted).")
+    ap.add_argument("--to", help="Target timezone; skips fzf, e.g. Asia/Tokyo.")
+    ap.add_argument(
+        "--from",
+        dest="from_tz",
+        help="Timezone to assume for naive inputs (default: local).",
+    )
+    ap.add_argument(
+        "--no-color", action="store_true", help="Disable the Catppuccin colored output."
+    )
+    args = ap.parse_args()
+
+    # Enable Catppuccin colors only for an interactive terminal (and honor
+    # --no-color and the NO_COLOR convention).
+    global COLOR_ENABLED
+    COLOR_ENABLED = (
+        not args.no_color and not os.environ.get("NO_COLOR") and sys.stdout.isatty()
+    )
+
+    # Source timezone for naive strings.
+    default_tz = ZoneInfo(args.from_tz) if args.from_tz else local_tz()
+
+    # 1) Get the date string.
+    raw = args.date or input("Enter a date/time string: ").strip()
+
+    # 2) Parse it.
+    try:
+        entered, note = parse_datetime(raw, default_tz)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # 3) Choose the target timezone (fzf).
+    target = resolve_target_tz(args.to)
+    converted = entered.astimezone(target)
+
+    # 4) Report (Catppuccin Mocha palette).
+    fmt = "%Y-%m-%d %H:%M:%S %Z (%z)"
+
+    def row(label, value, value_color, bold=False):
+        # Fixed-width mauve label, then the colored value.
+        print(
+            f"{paint(f'{label:<13}', 'mauve')}"
+            f"{paint(':', 'surface')} "
+            f"{paint(value, value_color, bold=bold)}"
+        )
+
+    print()
+    print(paint("  Timezone Conversion  ", "mauve", bold=True))
+    print(paint("  " + "-" * 21, "surface"))
+    row("Input string", raw, "text", bold=True)
+    print(f"{'':<13} {paint('  -> ' + note, 'subtext')}")
+    row("Entered time", entered.strftime(fmt), "sky")
+    row(
+        "Converted to",
+        f"{converted.strftime(fmt)}   [{target.key}]",
+        "green",
+        bold=True,
+    )
+    row("UTC", entered.astimezone(UTC).strftime(fmt), "teal")
+    row("Epoch seconds", str(int(entered.timestamp())), "peach")
+    row("Relative", human_delta(entered), "yellow")
+    print()
+
+
+if __name__ == "__main__":
+    main()
