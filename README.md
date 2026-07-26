@@ -156,12 +156,26 @@ your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 # one-word conversions to your common zones
-alias tzny='tzc --to America/New_York'
-alias tzla='tzc --to America/Los_Angeles'
-alias tzldn='tzc --to Europe/London'
-alias tzutc='tzc --to UTC'
+# --- Americas ---
+alias tzsfo='tzc --to America/Los_Angeles'   # SFO  San Francisco
+alias tzsea='tzc --to America/Los_Angeles'   # SEA  Seattle
+alias tzaus='tzc --to America/Chicago'       # AUS  Austin
+alias tzjfk='tzc --to America/New_York'      # JFK  New York
+alias tzyyz='tzc --to America/Toronto'       # YYZ  Toronto
+ 
+# --- Europe / Middle East ---
+alias tzlhr='tzc --to Europe/London'         # LHR  London
+alias tzber='tzc --to Europe/Berlin'         # BER  Berlin
+alias tztlv='tzc --to Asia/Jerusalem'        # TLV  Tel Aviv
+ 
+# --- Asia / Pacific ---
+alias tzblr='tzc --to Asia/Kolkata'          # BLR  Bengaluru
+alias tzszx='tzc --to Asia/Shanghai'         # SZX  Shenzhen
+alias tzsin='tzc --to Asia/Singapore'        # SIN  Singapore
+alias tzhnd='tzc --to Asia/Tokyo'            # HND  Tokyo
+alias tzsyd='tzc --to Australia/Sydney'      # SYD  Sydney
 
-# usage: tzny "2026-07-24T14:35:18Z"
+# usage: tzsfo "2026-07-24T14:35:18Z"
 ```
 
 Prefer functions so you can convert whatever is on your clipboard in one shot:
