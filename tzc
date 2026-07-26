@@ -46,7 +46,18 @@ import argparse
 import re
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
+
+# datetime.UTC is an alias for datetime.timezone.utc that was only added in
+# Python 3.11. Importing it unconditionally makes the whole script fail on 3.9
+# and 3.10 with "ImportError: cannot import name 'UTC' from 'datetime'", so
+# fall back to the older spelling when it is missing.
+try:
+    from datetime import UTC
+except ImportError:  # Python < 3.11
+    from datetime import timezone
+
+    UTC = timezone.utc
 
 try:
     from zoneinfo import ZoneInfo, available_timezones
@@ -307,7 +318,9 @@ def parse_datetime(s, default_tz):
     # 2) Normalize trailing 'Z' and timezone abbreviations to numeric offsets.
     norm = normalize_input(s)
 
-    # Try the fast stdlib ISO parser first (very permissive on 3.11+).
+    # Try the fast stdlib ISO parser first (very permissive on 3.11+; on 3.9 and
+    # 3.10 it only accepts strict isoformat() output, so more inputs simply fall
+    # through to the strptime patterns below - same result, marginally slower).
     try:
         dt = datetime.fromisoformat(norm)
         if dt.tzinfo is None:
