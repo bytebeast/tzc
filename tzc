@@ -67,6 +67,7 @@ except ImportError:  # Python < 3.9
 
 import os
 
+__author__ = "github.com/bytebeast"
 APP_VERSION = "1.1.0"
 
 # ============================================================
