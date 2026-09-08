@@ -5,8 +5,8 @@ tzconvert.py
 
 Interactively:
   1. Ask you for a date/time string (auto-detects ~10 common formats).
-  2. Let you pick a target timezone with fzf.
-  3. Print the time you entered, the converted time, and a human-readable
+  2. Let you pick one or more target timezones with fzf.
+  3. Print the time you entered, the converted time(s), and a human-readable
      "2 days, 4 hours, 5 minutes ago" style relative time.
 
 Recognized input formats
@@ -33,11 +33,24 @@ months, years (and common short forms like sec/min/hr/d/wk/mo/yr). "now" and
 Naive timestamps (no timezone in the string) are assumed to be in your LOCAL
 timezone by default; override with --from "Region/City" (e.g. --from UTC).
 
+Converting to several timezones at once
+---------------------------------------
+--to may be repeated, and each one also accepts a comma-separated list, so all
+of these print three converted lines:
+
+    tzc 1721831718 --to Asia/Tokyo --to Europe/London --to America/New_York
+    tzc 1721831718 --to Asia/Tokyo,Europe/London,America/New_York
+    tzc 1721831718 --to Asia/Tokyo,Europe/London --to America/New_York
+
+Duplicates are dropped and the order you gave is preserved. In the fzf picker,
+press TAB to mark several zones (Shift-TAB to unmark) and Enter to convert to
+all of them at once.
+
 Dependencies
 ------------
   * Python 3.9+ (uses the stdlib zoneinfo module).
   * fzf on your PATH for interactive timezone picking. If fzf is missing, or
-    you pass --to, the script falls back to a plain text prompt / that value.
+    you pass --to, the script falls back to a plain text prompt / those values.
   * On some minimal Linux installs you may need the IANA tz database:
         pip install tzdata     (only if zoneinfo can't find zones)
 """
@@ -68,7 +81,7 @@ except ImportError:  # Python < 3.9
 import os
 
 __author__ = "github.com/bytebeast"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 
 # ============================================================
 # Catppuccin (Mocha) color scheme
@@ -413,21 +426,30 @@ def build_zone_lines():
     return lines
 
 
-def pick_timezone_with_fzf():
-    """Pipe the annotated IANA timezone list into fzf; return the chosen zone."""
+def pick_timezones_with_fzf():
+    """
+    Pipe the annotated IANA timezone list into fzf and return the chosen zone
+    names as a list. fzf runs in --multi mode, so TAB marks several zones and
+    every marked line comes back.
+
+    Returns None if fzf isn't installed (the caller falls back to a text
+    prompt), or an empty list if the picker was cancelled.
+    """
     lines = "\n".join(build_zone_lines())
     try:
         proc = subprocess.run(
             [
                 "fzf",
-                "--prompt=Convert to timezone (try an abbrev like IST)> ",
+                # Multi-select: TAB marks a zone, Shift-TAB unmarks it.
+                "--multi",
+                "--prompt=Convert to timezone(s) (TAB to pick several)> ",
                 "--height=60%",
                 "--reverse",
                 "--border",
                 # Search across the whole line so both zone name AND abbrev match.
                 "--nth=1..",
                 "--tiebreak=begin",
-                "--header=Type a zone name or an abbreviation (EST, PDT, IST, JST...)",
+                "--header=Type a zone name or an abbreviation (EST, PDT, IST, JST...). TAB selects multiple zones, Enter confirms.",
             ],
             input=lines,
             text=True,
@@ -435,28 +457,62 @@ def pick_timezone_with_fzf():
         )
     except FileNotFoundError:
         return None  # fzf not installed -> caller falls back to a text prompt
-    choice = proc.stdout.strip()
-    if not choice:
-        return None
-    # The zone name is the first whitespace-delimited token (IANA names have no
-    # spaces); the rest of the line is just the abbreviation annotation.
-    return choice.split()[0]
+    # One selection per line. The zone name is the first whitespace-delimited
+    # token (IANA names have no spaces); the rest is the abbrev/offset annotation.
+    return [line.split()[0] for line in proc.stdout.splitlines() if line.strip()]
 
 
-def resolve_target_tz(cli_value):
+def split_zone_names(values):
     """
-    Decide the target timezone:
-      --to given  -> use it directly (no fzf).
-      else        -> fzf picker.
-      fzf missing -> plain text prompt.
+    Flatten repeated --to flags into a list of zone names, also splitting on
+    commas so `--to Asia/Tokyo,Europe/London` works like two separate flags.
     """
-    if cli_value:
-        return ZoneInfo(cli_value)
+    names = []
+    for value in values or []:
+        for part in value.split(","):
+            part = part.strip()
+            if part:
+                names.append(part)
+    return names
 
-    choice = pick_timezone_with_fzf()
-    if choice is None:
-        choice = input("Target timezone (e.g. America/New_York): ").strip()
-    return ZoneInfo(choice)
+
+def load_zone(name):
+    """ZoneInfo(name) with a friendly error instead of a traceback."""
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        raise ValueError(
+            f"Unknown timezone: {name!r} (expected an IANA name like Asia/Tokyo)"
+        )
+
+
+def resolve_target_tzs(cli_values):
+    """
+    Decide the target timezone(s), returning a list of ZoneInfo:
+      --to given (repeatable, comma-separated) -> use those, in order, no fzf.
+      else                                     -> fzf multi-select picker.
+      fzf missing                              -> plain text prompt.
+    Duplicates are dropped while preserving the order they were given in.
+    """
+    names = split_zone_names(cli_values)
+
+    if not names:
+        names = pick_timezones_with_fzf()
+        if names is None:  # fzf not installed
+            answer = input(
+                "Target timezone(s), comma-separated (e.g. America/New_York, Asia/Tokyo): "
+            )
+            names = split_zone_names([answer])
+        if not names:
+            raise ValueError("No target timezone selected.")
+
+    zones, seen = [], set()
+    for name in names:
+        zone = load_zone(name)
+        if zone.key not in seen:
+            seen.add(zone.key)
+            zones.append(zone)
+    return zones
 
 
 # ============================================================
@@ -506,7 +562,15 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("date", nargs="?", help="Date string (prompted if omitted).")
-    ap.add_argument("--to", help="Target timezone; skips fzf, e.g. Asia/Tokyo.")
+    ap.add_argument(
+        "--to",
+        action="append",
+        metavar="TZ",
+        help=(
+            "Target timezone; skips fzf, e.g. Asia/Tokyo. Repeat the flag "
+            "(or pass a comma-separated list) to convert to several zones at once."
+        ),
+    )
     ap.add_argument(
         "--from",
         dest="from_tz",
@@ -537,18 +601,24 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 3) Choose the target timezone (fzf).
-    target = resolve_target_tz(args.to)
-    converted = entered.astimezone(target)
+    # 3) Choose the target timezone(s) (fzf, unless --to was given).
+    try:
+        targets = resolve_target_tzs(args.to)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    conversions = [(target, entered.astimezone(target)) for target in targets]
 
     # 4) Report (Catppuccin Mocha palette).
     fmt = "%Y-%m-%d %H:%M:%S %Z (%z)"
 
     def row(label, value, value_color, bold=False):
-        # Fixed-width mauve label, then the colored value.
+        # Fixed-width mauve label, then the colored value. An empty label gives
+        # a blank, colon-less continuation line for extra converted zones.
+        separator = paint(":", "surface") if label else " "
         print(
             f"{paint(f'{label:<13}', 'mauve')}"
-            f"{paint(':', 'surface')} "
+            f"{separator} "
             f"{paint(value, value_color, bold=bold)}"
         )
 
@@ -558,12 +628,16 @@ def main():
     row("Input string", raw, "text", bold=True)
     print(f"{'':<13} {paint('  -> ' + note, 'subtext')}")
     row("Entered time", entered.strftime(fmt), "sky")
-    row(
-        "Converted to",
-        f"{converted.strftime(fmt)}   [{target.key}]",
-        "green",
-        bold=True,
-    )
+    # Pad the timestamps to a common width so the [zone] tags line up when
+    # several zones are converted at once (%Z varies: JST, GMT+3, +0530, ...).
+    width = max(len(converted.strftime(fmt)) for _, converted in conversions)
+    for index, (target, converted) in enumerate(conversions):
+        row(
+            "Converted to" if index == 0 else "",
+            f"{converted.strftime(fmt):<{width}}   [{target.key}]",
+            "green",
+            bold=True,
+        )
     row("UTC", entered.astimezone(UTC).strftime(fmt), "teal")
     row("Epoch seconds", str(int(entered.timestamp())), "peach")
     row("Relative", human_delta(entered), "yellow")
