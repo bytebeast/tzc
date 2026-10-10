@@ -81,7 +81,7 @@ jobs:
 
       # - uses: gitleaks/gitleaks-action@v2
       # cli cmd: gh api repos/gitleaks/gitleaks-action/commits/v2 --jq .sha
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+      - uses: gitleaks/gitleaks-action@d23441a48e516b6c34aea4fa41551a30e30af803 # v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
  
