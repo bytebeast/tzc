@@ -50,7 +50,11 @@ results in a clean Catppuccin-colored block.
 - **Paste and go** - auto-detects roughly a dozen timestamp formats, so you
   rarely have to tell it anything about the input
 - **UTC and offset aware** - `Z`, `+02:00`, and named abbreviations (UTC, PST,
-  IST, JST, ...) are all understood
+  IST, JST, ...) are all understood, with a warning when an abbreviation is
+  ambiguous (`CST`, `IST`, `BST`) or does not match the date (`CST` in October)
+- **DST-correct** - naive timestamps use your real IANA zone's rules for _that
+  date_, and a time that was skipped or repeated by a clock change is flagged
+  and shown both ways instead of silently guessed
 - **Unix epoch in any resolution** - seconds, milliseconds, microseconds, or
   nanoseconds, detected automatically
 - **Human-readable relative input** - type `31 days, 4 hours, 25 minutes ago` or
@@ -213,12 +217,12 @@ alias tzsea='tzc --to America/Los_Angeles'   # SEA  Seattle
 alias tzaus='tzc --to America/Chicago'       # AUS  Austin
 alias tzjfk='tzc --to America/New_York'      # JFK  New York
 alias tzyyz='tzc --to America/Toronto'       # YYZ  Toronto
- 
+
 # --- Europe / Middle East ---
 alias tzlhr='tzc --to Europe/London'         # LHR  London
 alias tzber='tzc --to Europe/Berlin'         # BER  Berlin
 alias tztlv='tzc --to Asia/Jerusalem'        # TLV  Tel Aviv
- 
+
 # --- Asia / Pacific ---
 alias tzblr='tzc --to Asia/Kolkata'          # BLR  Bengaluru
 alias tzszx='tzc --to Asia/Shanghai'         # SZX  Shenzhen
@@ -266,38 +270,69 @@ share it), and you are done.
 
 ## Recognized input formats
 
-| Input example                      | Source                       |
-| ---------------------------------- | ---------------------------- |
-| `2026-07-24 14:35:18`              | SQL databases, apps (naive)  |
-| `2026-07-24T14:35:18Z`             | APIs, Kubernetes (UTC)       |
-| `2026-07-24T14:35:18.123Z`         | Cloud-native apps (UTC)      |
-| `2026-07-24T14:35:18+02:00`        | ISO-8601 with offset         |
-| `Jul 24 14:35:18`                  | Linux syslog (year assumed)  |
-| `Jul 24 14:35:18.123`              | systemd, Java (year assumed) |
-| `Fri Jul 24 07:19:59 UTC 2026`     | Unix `date` command output   |
-| `1721831718`                       | Unix epoch seconds           |
-| `1721831718123`                    | Unix epoch milliseconds      |
-| `1721831718123456789`              | Unix epoch nanoseconds       |
-| `24/Jul/2026:14:35:18 +0000`       | Apache / Nginx access log    |
-| `31 days, 4 hours, 25 minutes ago` | Human-readable relative time |
-| `in 3 hours, 12 minutes`           | Human-readable relative time |
+| Input example                      | Source                                         |
+| ---------------------------------- | ---------------------------------------------- |
+| `2026-07-24 14:35:18`              | SQL databases, apps (naive)                    |
+| `2026-07-24T14:35:18Z`             | APIs, Kubernetes (UTC)                         |
+| `2026-07-24T14:35:18.123Z`         | Cloud-native apps (UTC)                        |
+| `2026-07-24T14:35:18+02:00`        | ISO-8601 with offset                           |
+| `Jul 24 14:35:18`                  | Linux syslog (year assumed)                    |
+| `Jul 24 14:35:18.123`              | systemd, Java (year assumed)                   |
+| `Fri Jul 24 07:19:59 UTC 2026`     | Unix `date` command output                     |
+| `1721831718`                       | Unix epoch seconds                             |
+| `1721831718123`                    | Unix epoch milliseconds                        |
+| `1721831718123456789`              | Unix epoch nanoseconds                         |
+| `24/Jul/2026:14:35:18 +0000`       | Apache / Nginx access log                      |
+| `07/24/2026 14:35:18`              | Numeric date (MM/DD; DD/MM with `--day-first`) |
+| `31 days, 4 hours, 25 minutes ago` | Human-readable relative time                   |
+| `in 3 hours, 12 minutes`           | Human-readable relative time                   |
 
 Naive timestamps (no zone in the string) are assumed to be in your **local**
-timezone unless you pass `--from`.
+timezone unless you pass `--from`. tzc finds your IANA zone from `$TZ` or
+`/etc/localtime` and applies that zone's daylight-saving rules for the date you
+entered, so a January timestamp gets winter time even when you run it in July.
+Fractional seconds are kept (down to microseconds), and syslog-style lines with
+no year get the most recent year that does not put them in the future.
+
+### Warnings
+
+tzc prints a red `!!` line, and exits with status 3 under `--strict`, when the
+answer might be wrong:
+
+| Situation                       | Example                                 | What tzc does                                                        |
+| ------------------------------- | --------------------------------------- | -------------------------------------------------------------------- |
+| Time skipped by spring-forward  | `2026-03-08 02:30:00` in Los Angeles    | Says it cannot have come from a correct clock and shows both offsets |
+| Time repeated by fall-back      | `2026-11-01 01:30:00` in Los Angeles    | Shows the first occurrence, then the second                          |
+| Ambiguous abbreviation          | `CST`, `IST`, `BST`                     | Names the other meanings; use an offset or `--from`                  |
+| Abbreviation wrong for the date | `CST` in October (US Central is on CDT) | Suggests the source was mislabeled                                   |
+| Ambiguous numeric date          | `03/04/2026`                            | Reads MM/DD unless `--day-first`                                     |
+| Local zone unknown              | `$TZ` set to a POSIX rule string        | Says naive times use today's fixed offset                            |
 
 ---
 
 ## Options
 
-| Flag          | Description                                                                                                                                    |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Flag          | Description                                                                                                                                         |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--to ZONE`   | Target timezone; skips the fzf picker (e.g. `--to Asia/Tokyo`). Repeatable, and accepts a comma-separated list, to convert to several zones at once |
-| `--from ZONE` | Timezone to assume for naive inputs (default: your local zone)                                                                                 |
-| `--no-color`  | Disable the Catppuccin colored output                                                                                                          |
+| `--from ZONE` | Timezone to assume for naive inputs (default: your local zone)                                                                                      |
+| `--day-first` | Read ambiguous numeric dates like `03/04/2026` as DD/MM (default MM/DD)                                                                             |
+| `--strict`    | Exit with status 3 when the result carries a warning (for scripts)                                                                                  |
+| `--no-color`  | Disable the Catppuccin colored output                                                                                                               |
+| `-V`          | Print the version                                                                                                                                   |
 
 Output includes the parsed input, the entered time, the converted time (one line
 per `--to` zone), the UTC equivalent, the Unix epoch, and a friendly relative
 time.
+
+---
+
+## Tests
+
+```bash
+pip install pytest
+python3 -m pytest -q tests
+```
 
 ---
 

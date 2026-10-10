@@ -21,6 +21,7 @@ Recognized input formats
   1721831718123                    Unix epoch milliseconds
   1721831718123456789              Unix epoch nanoseconds
   24/Jul/2026:14:35:18 +0000       Apache / Nginx access log
+  07/24/2026 14:35[:18]            US-style numeric date        (DD/MM with --day-first)
   31 days, 4 hours, 25 minutes ago human-readable relative time (past)
   in 3 hours, 12 minutes           human-readable relative time (future)
 
@@ -31,7 +32,17 @@ months, years (and common short forms like sec/min/hr/d/wk/mo/yr). "now" and
 "just now" resolve to the current instant.
 
 Naive timestamps (no timezone in the string) are assumed to be in your LOCAL
-timezone by default; override with --from "Region/City" (e.g. --from UTC).
+IANA timezone by default (from $TZ or /etc/localtime), with that zone's
+daylight-saving rules for the date given; override with --from "Region/City"
+(e.g. --from UTC).
+
+Warnings (printed with !!, and exit status 3 under --strict)
+------------------------------------------------------------
+  * a naive time that did not exist (clocks sprang forward) or happened twice
+    (clocks fell back) in the source zone; both readings are shown
+  * an ambiguous abbreviation (CST, IST, BST), or one that does not match the
+    date (e.g. "CST" in October, when US Central is on CDT)
+  * an ambiguous numeric date such as 03/04/2026
 
 Converting to several timezones at once
 ---------------------------------------
@@ -59,7 +70,7 @@ import argparse
 import re
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # datetime.UTC is an alias for datetime.timezone.utc that was only added in
 # Python 3.11. Importing it unconditionally makes the whole script fail on 3.9
@@ -68,8 +79,6 @@ from datetime import datetime, timedelta
 try:
     from datetime import UTC
 except ImportError:  # Python < 3.11
-    from datetime import timezone
-
     UTC = timezone.utc
 
 try:
@@ -81,7 +90,7 @@ except ImportError:  # Python < 3.9
 import os
 
 __author__ = "github.com/bytebeast"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 # ============================================================
 # Catppuccin (Mocha) color scheme
@@ -123,9 +132,9 @@ def paint(text, color, bold=False):
 # ============================================================
 # Common timezone abbreviations -> fixed numeric offsets. strptime's %Z only
 # understands UTC/GMT/local, so we translate abbreviations to offsets ourselves
-# before parsing. NOTE: some abbreviations are ambiguous (e.g. IST, CST); the
-# mapping below picks the most common meaning. For anything critical, feed an
-# explicit numeric offset instead.
+# before parsing. Abbreviations are NOT unique (CST is US Central, China and
+# Cuba; IST is India, Israel and Ireland), so every substitution is reported,
+# and the ambiguous ones produce a warning naming the other meanings.
 TZ_ABBREV = {
     "UTC": "+0000",
     "GMT": "+0000",
@@ -138,27 +147,77 @@ TZ_ABBREV = {
     "MDT": "-0600",
     "PST": "-0800",
     "PDT": "-0700",
+    "AKST": "-0900",
+    "AKDT": "-0800",
+    "HST": "-1000",
     "BST": "+0100",
+    "WET": "+0000",
+    "WEST": "+0100",
     "CET": "+0100",
     "CEST": "+0200",
     "EET": "+0200",
     "EEST": "+0300",
+    "MSK": "+0300",
     "IST": "+0530",
+    "SGT": "+0800",
+    "HKT": "+0800",
     "JST": "+0900",
     "KST": "+0900",
     "AEST": "+1000",
     "AEDT": "+1100",
     "NZST": "+1200",
+    "NZDT": "+1300",
+}
+
+# Abbreviations with more than one meaning in common use. The offset used is
+# the one in TZ_ABBREV; these are the alternatives we warn about.
+AMBIGUOUS_ABBREV = {
+    "CST": "China Standard Time (+0800) or Cuba Standard Time (-0500)",
+    "IST": "Israel Standard Time (+0200) or Irish Standard Time (+0100)",
+    "BST": "Bangladesh Standard Time (+0600)",
+}
+
+# Abbreviations tied to a daylight-saving zone. If the abbreviation does not
+# match what that zone actually used on the parsed date (e.g. "CST" in
+# October, when US Central is on CDT), the source clock was probably mislabeled
+# and the result is likely an hour off, so we warn.
+ABBREV_HOME_ZONE = {
+    "EST": "America/New_York",
+    "EDT": "America/New_York",
+    "CST": "America/Chicago",
+    "CDT": "America/Chicago",
+    "MST": "America/Denver",
+    "MDT": "America/Denver",
+    "PST": "America/Los_Angeles",
+    "PDT": "America/Los_Angeles",
+    "AKST": "America/Anchorage",
+    "AKDT": "America/Anchorage",
+    "BST": "Europe/London",
+    "WET": "Europe/Lisbon",
+    "WEST": "Europe/Lisbon",
+    "CET": "Europe/Paris",
+    "CEST": "Europe/Paris",
+    "EET": "Europe/Athens",
+    "EEST": "Europe/Athens",
+    "AEST": "Australia/Sydney",
+    "AEDT": "Australia/Sydney",
+    "NZST": "Pacific/Auckland",
+    "NZDT": "Pacific/Auckland",
 }
 
 # strptime patterns tried in order. %z handles ±HH:MM and +0000 offsets.
 STRPTIME_FORMATS = [
     "%Y-%m-%d %H:%M:%S",  # SQL:            2026-07-24 14:35:18
     "%Y-%m-%d %H:%M:%S.%f",  # SQL w/ millis
+    "%Y-%m-%d %H:%M",  # no seconds
+    "%Y-%m-%d %H:%M:%S %z",  # SQL + offset/abbrev
+    "%Y-%m-%d %H:%M:%S.%f %z",
+    "%Y-%m-%d %H:%M %z",
     "%Y-%m-%dT%H:%M:%S%z",  # ISO w/ offset:  ...T14:35:18+00:00 / ...Z (normalized below)
     "%Y-%m-%dT%H:%M:%S.%f%z",  # ISO w/ millis+offset
     "%Y-%m-%dT%H:%M:%S",  # ISO, no zone
     "%Y-%m-%dT%H:%M:%S.%f",  # ISO w/ millis, no zone
+    "%Y-%m-%dT%H:%M",
     "%d/%b/%Y:%H:%M:%S %z",  # Apache/Nginx:   24/Jul/2026:14:35:18 +0000
     "%a %b %d %H:%M:%S %z %Y",  # `date` cmd:     Fri Jul 24 07:19:59 UTC 2026 (abbrev->offset)
     "%a %b %d %H:%M:%S %Y",  # ctime/`date`:   Fri Jul 24 07:19:59 2026 (no zone)
@@ -168,19 +227,132 @@ STRPTIME_FORMATS = [
     "%b %d %H:%M:%S.%f",  # systemd/Java:   Jul 24 14:35:18.123
 ]
 
+# Numeric dates with slashes: 10/03/2026 14:35[:18[.123]] [offset]. Which part
+# is the month is decided by the values (a part > 12 must be the day), and
+# otherwise by --day-first, with a warning because the input is ambiguous.
+_SLASH_DATE = re.compile(
+    r"^(\d{1,2})/(\d{1,2})/(\d{4})[ T](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?"
+    r"(?:\s*([+-]\d{2}:?\d{2}))?$"
+)
+
+# Fractional seconds longer than microseconds (e.g. Kubernetes / Go nanos).
+_LONG_FRACTION = re.compile(r"(\d{2}:\d{2}:\d{2}\.\d{6})\d+")
+
+
+class Parsed:
+    """Result of parse_datetime: the instant plus everything the user should know.
+
+    dt           the chosen aware datetime
+    notes        neutral notes on how the input was read (shown in grey)
+    warnings     things that may make the answer wrong (shown in red)
+    alternative  (label, datetime) for a second valid reading, or None
+    """
+
+    def __init__(self, dt, notes=None, warnings=None, alternative=None):
+        self.dt = dt
+        self.notes = list(notes or [])
+        self.warnings = list(warnings or [])
+        self.alternative = alternative
+
+    # Older callers unpacked (dt, note); keep that working.
+    def __iter__(self):
+        yield self.dt
+        yield "; ".join(self.notes)
+
 
 def normalize_input(s):
     """
-    Prepare a raw string for parsing:
-      * turn a trailing 'Z' into an explicit +00:00 offset, and
-      * replace standalone timezone abbreviations (UTC, PDT, JST, ...) with
-        their numeric offsets so %z can read them.
+    Prepare a raw string for parsing. Returns (normalized, abbreviations, notes):
+      * a trailing 'Z' after a time becomes an explicit +00:00 offset,
+      * fractional seconds beyond microseconds are truncated (noted),
+      * standalone timezone abbreviations (UTC, PDT, JST, ...) are replaced by
+        their numeric offsets so %z can read them; the ones replaced are
+        returned so the caller can warn about ambiguous or mismatched ones.
     """
-    if s.endswith("Z") and "T" in s:  # ISO Zulu, e.g. 2026-07-24T14:35:18Z
+    notes = []
+    if re.search(r"\d(\.\d+)?Z$", s):  # ISO Zulu, e.g. 2026-07-24T14:35:18Z
         s = s[:-1] + "+00:00"
+    if _LONG_FRACTION.search(s):
+        s = _LONG_FRACTION.sub(r"\1", s)
+        notes.append("sub-microsecond digits truncated")
     # Replace whole-word tz abbreviations only (leaves month names etc. alone).
-    tokens = [TZ_ABBREV.get(tok, tok) for tok in s.split(" ")]
-    return " ".join(tokens)
+    used = []
+    tokens = []
+    for tok in s.split(" "):
+        if tok in TZ_ABBREV:
+            used.append(tok)
+            tokens.append(TZ_ABBREV[tok])
+        else:
+            tokens.append(tok)
+    return " ".join(tokens), used, notes
+
+
+def check_abbreviations(dt, used):
+    """Warnings for timezone abbreviations that may not mean what we assumed."""
+    warnings = []
+    for abbr in used:
+        if abbr in ("UTC", "GMT", "Z"):
+            continue
+        if abbr in AMBIGUOUS_ABBREV:
+            warnings.append(
+                f"'{abbr}' was read as UTC{TZ_ABBREV[abbr][:3]}:{TZ_ABBREV[abbr][3:]}, "
+                f"but it can also mean {AMBIGUOUS_ABBREV[abbr]}. "
+                "Pass a numeric offset or use --from Region/City to be sure."
+            )
+        home = ABBREV_HOME_ZONE.get(abbr)
+        if home:
+            actual = dt.astimezone(ZoneInfo(home))
+            actual_abbr = actual.tzname()
+            if actual_abbr != abbr:
+                warnings.append(
+                    f"On this date {home} was on {actual_abbr} "
+                    f"({actual.strftime('%z')}), not {abbr}. If the timestamp came "
+                    f"from a clock set to {home}, it is probably mislabeled and this result "
+                    f"is off by the DST hour; re-run without the abbreviation and "
+                    f"with --from {home}. (Ignore this if the source deliberately "
+                    "uses standard time all year, e.g. Arizona for MST.)"
+                )
+    return warnings
+
+
+def check_wall_time(dt):
+    """
+    For a naive time that was placed in a real IANA zone, detect daylight-saving
+    transitions. Returns (warning, alternative) or (None, None).
+
+      nonexistent: the wall time was skipped when clocks sprang forward
+                   (e.g. 02:30 on the US spring-forward night). It cannot have
+                   come from a correct clock in that zone.
+      ambiguous:   the wall time happened twice when clocks fell back
+                   (e.g. 01:30 on the US fall-back night).
+
+    The primary reading is fold=0 (the earlier offset); the alternative is
+    fold=1. Both are reported so nothing is silently chosen.
+    """
+    tz = dt.tzinfo
+    if not isinstance(tz, ZoneInfo):
+        return None, None
+    first, second = dt.replace(fold=0), dt.replace(fold=1)
+    if first.utcoffset() == second.utcoffset():
+        return None, None
+    wall = first.replace(tzinfo=None)
+    round_trip = first.astimezone(UTC).astimezone(tz).replace(tzinfo=None)
+    if round_trip != wall:
+        return (
+            f"{wall:%Y-%m-%d %H:%M:%S} does not exist in {tz.key}: clocks jumped "
+            f"forward over it. The source clock was probably in another zone or "
+            f"wrong. Showing it read with the pre-jump offset "
+            f"({first.strftime('%z')}) and, below, with the post-jump offset "
+            f"({second.strftime('%z')}).",
+            ("Alternative", second),
+        )
+    return (
+        f"{wall:%Y-%m-%d %H:%M:%S} happened twice in {tz.key} because clocks "
+        f"fell back. Showing the first occurrence ({first.tzname()}); the second "
+        f"({second.tzname()}) is shown below. Check surrounding log lines to "
+        "tell which one it was.",
+        ("2nd occurrence", second),
+    )
 
 
 # Human-readable relative time, e.g. "31 days, 4 hours, 25 minutes ago".
@@ -289,50 +461,154 @@ def _parse_epoch(s):
     if not core.replace(".", "", 1).isdigit():
         return None
 
+    # Integer arithmetic throughout: a float cannot hold a nanosecond epoch
+    # (~1.7e18) exactly, and fromtimestamp() rounds differently per platform.
     if "." in core:
         # fractional value is always interpreted as SECONDS
-        seconds = float(t)
+        whole, frac = core.split(".")
+        micros = int(whole or "0") * 1_000_000 + int((frac + "000000")[:6])
     else:
         digits = len(core)
-        value = int(t)
+        value = int(core)
         if digits <= 10:
-            seconds = value
+            micros = value * 1_000_000
         elif digits <= 13:
-            seconds = value / 1_000
+            micros = value * 1_000
         elif digits <= 16:
-            seconds = value / 1_000_000
+            micros = value
         else:
-            seconds = value / 1_000_000_000
-    return datetime.fromtimestamp(seconds, tz=UTC)
+            micros = value // 1_000
+    if neg:
+        micros = -micros
+    return EPOCH + timedelta(microseconds=micros)
 
 
-def parse_datetime(s, default_tz):
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _epoch_unit(s):
+    core = s.strip().lstrip("-")
+    if "." in core:
+        return "seconds"
+    digits = len(core)
+    if digits <= 10:
+        return "seconds"
+    if digits <= 13:
+        return "milliseconds"
+    if digits <= 16:
+        return "microseconds"
+    return "nanoseconds"
+
+
+def _parse_slash_date(norm, day_first):
+    """
+    Parse 10/03/2026 14:35 style input. Returns (datetime, notes, warnings) or
+    None if `norm` is not in that shape. The datetime is naive unless the
+    input carried an offset.
+    """
+    m = _SLASH_DATE.match(norm)
+    if not m:
+        return None
+    a, b, year, hh, mi, ss, frac, off = m.groups()
+    a, b = int(a), int(b)
+    notes, warnings = [], []
+    if a > 12 and b > 12:
+        raise ValueError(f"Could not parse date string: {norm!r} (no valid month)")
+    if a > 12:
+        day, month = a, b
+        notes.append("read as DD/MM/YYYY (first part > 12)")
+    elif b > 12:
+        month, day = a, b
+        notes.append("read as MM/DD/YYYY (second part > 12)")
+    elif a == b:
+        month = day = a
+    elif day_first:
+        day, month = a, b
+        warnings.append(
+            f"'{a:02d}/{b:02d}' is ambiguous; read as DD/MM (--day-first). "
+            "Without --day-first it would be MM/DD."
+        )
+    else:
+        month, day = a, b
+        warnings.append(
+            f"'{a:02d}/{b:02d}' is ambiguous; read as MM/DD (US order). "
+            "Pass --day-first if it is DD/MM."
+        )
+    micro = int((frac + "000000")[:6]) if frac else 0
+    dt = datetime(int(year), month, day, int(hh), int(mi), int(ss or 0), micro)
+    if off:
+        sign = 1 if off[0] == "+" else -1
+        digits = off[1:].replace(":", "")
+        delta = timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+        dt = dt.replace(tzinfo=timezone(sign * delta))
+    return dt, notes, warnings
+
+
+def _finish_naive(dt, default_tz, notes, warnings):
+    """Attach default_tz to a naive datetime and check DST edges."""
+    dt = dt.replace(tzinfo=default_tz)
+    notes.append(f"naive input; assumed {_zone_label(default_tz)}")
+    warning, alternative = check_wall_time(dt)
+    if warning:
+        warnings.append(warning)
+        dt = dt.replace(fold=0)
+    return Parsed(dt, notes, warnings, alternative)
+
+
+def _zone_label(tz):
+    return getattr(tz, "key", None) or str(tz)
+
+
+def parse_datetime(s, default_tz, day_first=False, now=None):
     """
     Parse `s` into a timezone-aware datetime.
 
-    - Epoch numbers -> UTC.
-    - Strings carrying an offset/Z -> that zone.
-    - Naive strings -> `default_tz` (your local zone unless overridden).
-    - Year-less syslog formats -> current year is assumed.
+    - Epoch numbers -> UTC (exact to the microsecond).
+    - Strings carrying an offset/Z/abbreviation -> that offset, with warnings
+      for ambiguous or DST-mismatched abbreviations.
+    - Naive strings -> `default_tz` (your local IANA zone unless overridden),
+      with warnings for times that were skipped or repeated by a DST change.
+    - Year-less syslog formats -> the most recent year that does not put the
+      timestamp in the future.
 
-    Returns (aware_datetime, note) where `note` describes any assumption made.
+    Returns a Parsed (which also unpacks as (datetime, note) for old callers).
     """
     s = s.strip()
+    now = now or datetime.now(UTC)
 
     # 1) Epoch?
     epoch = _parse_epoch(s)
     if epoch is not None:
-        return epoch, "parsed as Unix epoch (UTC)"
+        return Parsed(epoch, [f"parsed as Unix epoch {_epoch_unit(s)} (UTC)"])
 
     # 1b) Human-readable relative expression, e.g. "31 days, 4 hours ago"?
     #     Resolved against "now" in the source timezone so the entered time is
     #     expressed there before conversion.
-    rel = parse_relative(s, datetime.now(default_tz))
+    rel = parse_relative(s, now.astimezone(default_tz).replace(microsecond=0))
     if rel is not None:
-        return rel
+        return Parsed(rel[0], [rel[1]])
 
-    # 2) Normalize trailing 'Z' and timezone abbreviations to numeric offsets.
-    norm = normalize_input(s)
+    # 2) Normalize trailing 'Z', long fractions and timezone abbreviations.
+    norm, used_abbrevs, notes = normalize_input(s)
+
+    def explicit(dt, extra_notes=()):
+        res = Parsed(dt, notes + list(extra_notes) + ["parsed with explicit timezone"])
+        if used_abbrevs:
+            res.notes.append(
+                "abbreviation " + ", ".join(f"{a}={TZ_ABBREV[a]}" for a in used_abbrevs)
+            )
+            res.warnings += check_abbreviations(dt, used_abbrevs)
+        return res
+
+    # 2b) Numeric slash dates (MM/DD/YYYY or DD/MM/YYYY).
+    slash = _parse_slash_date(norm, day_first)
+    if slash is not None:
+        dt, slash_notes, slash_warnings = slash
+        if dt.tzinfo is None:
+            return _finish_naive(dt, default_tz, notes + slash_notes, slash_warnings)
+        res = explicit(dt, slash_notes)
+        res.warnings = slash_warnings + res.warnings
+        return res
 
     # Try the fast stdlib ISO parser first (very permissive on 3.11+; on 3.9 and
     # 3.10 it only accepts strict isoformat() output, so more inputs simply fall
@@ -340,33 +616,47 @@ def parse_datetime(s, default_tz):
     try:
         dt = datetime.fromisoformat(norm)
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=default_tz), f"naive input; assumed {default_tz}"
-        return dt, "parsed with explicit timezone"
+            return _finish_naive(dt, default_tz, list(notes), [])
+        return explicit(dt)
     except ValueError:
         pass
 
     # 3) Fall back to the explicit strptime patterns.
     for fmt in STRPTIME_FORMATS:
         yearless = "%Y" not in fmt
-        # Inject the current year for year-less formats. This both fills in the
-        # missing year AND avoids the Python 3.15 DeprecationWarning about
-        # parsing a day-of-month with no year.
+        # Inject a year for year-less formats. This both fills in the missing
+        # year AND avoids the Python 3.15 DeprecationWarning about parsing a
+        # day-of-month with no year. Try this year first; if that lands in the
+        # future (a Dec 31 log line read on Jan 1) or is invalid (Feb 29), use
+        # the year before.
         use_fmt = ("%Y " + fmt) if yearless else fmt
-        use_str = f"{datetime.now().year} {norm}" if yearless else norm
-        try:
-            dt = datetime.strptime(use_str, use_fmt)
-        except ValueError:
+        local_now = now.astimezone(default_tz)
+        years = [local_now.year, local_now.year - 1] if yearless else [None]
+        for year in years:
+            use_str = f"{year} {norm}" if yearless else norm
+            try:
+                dt = datetime.strptime(use_str, use_fmt)
+            except ValueError:
+                continue
+            if yearless and year == local_now.year:
+                probe = dt if dt.tzinfo else dt.replace(tzinfo=default_tz)
+                if probe - now > timedelta(days=1):
+                    continue  # would be in the future: try last year
+            break
+        else:
             continue
 
-        note_parts = []
+        extra = []
         if yearless:
-            note_parts.append("year assumed = current year")
+            if dt.year == local_now.year:
+                extra.append(f"year assumed = {dt.year} (current year)")
+            else:
+                extra.append(
+                    f"year assumed = {dt.year} (current year would be in the future)"
+                )
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=default_tz)
-            note_parts.append(f"naive input; assumed {default_tz}")
-        else:
-            note_parts.append("parsed with explicit timezone")
-        return dt, "; ".join(note_parts)
+            return _finish_naive(dt, default_tz, notes + extra, [])
+        return explicit(dt, extra)
 
     raise ValueError(f"Could not parse date string: {s!r}")
 
@@ -483,7 +773,7 @@ def load_zone(name):
     except Exception:
         raise ValueError(
             f"Unknown timezone: {name!r} (expected an IANA name like Asia/Tokyo)"
-        )
+        ) from None
 
 
 def resolve_target_tzs(cli_values):
@@ -552,9 +842,84 @@ def human_delta(then, now=None):
 # ============================================================
 # Main
 # ============================================================
+def _zone_from_name(name):
+    """ZoneInfo for an IANA name or a path ending in zoneinfo/<name>, else None."""
+    if not name:
+        return None
+    name = name.strip()
+    if name.startswith(":"):
+        name = name[1:]
+    m = re.search(r"zoneinfo/(.+)$", name)
+    if m:
+        name = m.group(1)
+    if name.startswith("posix/") or name.startswith("right/"):
+        name = name.split("/", 1)[1]
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return None
+
+
 def local_tz():
-    """The system's local timezone as a tzinfo (with a real name if possible)."""
-    return datetime.now().astimezone().tzinfo
+    """
+    The system's local timezone as a real IANA ZoneInfo, so daylight-saving
+    rules apply to the date being converted rather than to today.
+
+    The previous version used datetime.now().astimezone().tzinfo, which is a
+    FIXED offset (today's). In October in Los Angeles that is -07:00, so every
+    naive January timestamp was converted with -07:00 instead of -08:00 and
+    came out an hour wrong.
+
+    Lookup order: $TZ, the /etc/localtime symlink (Linux, macOS), then
+    /etc/timezone (Debian). Returns (tzinfo, is_iana).
+    """
+    tz_env = os.environ.get("TZ")
+    if tz_env:
+        tz = _zone_from_name(tz_env)
+        if tz:
+            return tz, True
+        # $TZ is set to something we cannot map to an IANA zone (e.g. a POSIX
+        # rule string like EST5EDT,M3.2.0,M11.1.0). The C library honours it,
+        # so /etc/localtime would be the wrong zone: use today's offset and
+        # let the caller warn.
+        return datetime.now().astimezone().tzinfo, False
+    try:
+        tz = _zone_from_name(os.readlink("/etc/localtime"))
+        if tz is None:
+            tz = _zone_from_name(os.path.realpath("/etc/localtime"))
+        if tz:
+            return tz, True
+    except OSError:
+        pass
+    try:
+        with open("/etc/timezone") as f:
+            tz = _zone_from_name(f.read())
+        if tz:
+            return tz, True
+    except OSError:
+        pass
+    return datetime.now().astimezone().tzinfo, False
+
+
+def fmt_dt(dt):
+    """'2026-10-10 14:35:00.123 PDT (-0700)', keeping fractional seconds."""
+    base = dt.strftime("%Y-%m-%d %H:%M:%S")
+    if dt.microsecond:
+        frac = f"{dt.microsecond:06d}"
+        frac = frac[:3] if frac.endswith("000") else frac
+        base += "." + frac
+    return f"{base} {dt.strftime('%Z (%z)')}"
+
+
+def epoch_str(dt):
+    """Exact Unix epoch seconds for an aware datetime, with any fraction."""
+    delta = dt - EPOCH
+    micros = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+    whole, frac = divmod(micros, 1_000_000)
+    if not frac:
+        return str(whole)
+    text = f"{whole}.{frac:06d}".rstrip("0")
+    return text
 
 
 def main():
@@ -577,8 +942,22 @@ def main():
         help="Timezone to assume for naive inputs (default: local).",
     )
     ap.add_argument(
+        "--day-first",
+        action="store_true",
+        help="Read ambiguous numeric dates like 03/04/2026 as DD/MM (default MM/DD).",
+    )
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Exit with status 3 when the answer comes with a warning (DST gap or "
+            "overlap, ambiguous abbreviation or date). Useful in scripts."
+        ),
+    )
+    ap.add_argument(
         "--no-color", action="store_true", help="Disable the Catppuccin colored output."
     )
+    ap.add_argument("-V", "--version", action="version", version=APP_VERSION)
     args = ap.parse_args()
 
     # Enable Catppuccin colors only for an interactive terminal (and honor
@@ -589,17 +968,37 @@ def main():
     )
 
     # Source timezone for naive strings.
-    default_tz = ZoneInfo(args.from_tz) if args.from_tz else local_tz()
+    zone_warning = None
+    if args.from_tz:
+        try:
+            default_tz = load_zone(args.from_tz)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        default_tz, is_iana = local_tz()
+        if not is_iana:
+            zone_warning = (
+                "Could not determine your IANA timezone (set $TZ, e.g. "
+                "TZ=America/Los_Angeles). Naive times use today's fixed offset "
+                f"{datetime.now(default_tz).strftime('%z')}, which is wrong for "
+                "dates on the other side of a DST change. Use --from Region/City."
+            )
 
     # 1) Get the date string.
     raw = args.date or input("Enter a date/time string: ").strip()
 
     # 2) Parse it.
     try:
-        entered, note = parse_datetime(raw, default_tz)
+        parsed = parse_datetime(raw, default_tz, day_first=args.day_first)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    entered = parsed.dt
+    warnings = list(parsed.warnings)
+    naive = any(n.startswith("naive input") for n in parsed.notes)
+    if zone_warning and naive:
+        warnings.insert(0, zone_warning)
 
     # 3) Choose the target timezone(s) (fzf, unless --to was given).
     try:
@@ -607,11 +1006,8 @@ def main():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    conversions = [(target, entered.astimezone(target)) for target in targets]
 
     # 4) Report (Catppuccin Mocha palette).
-    fmt = "%Y-%m-%d %H:%M:%S %Z (%z)"
-
     def row(label, value, value_color, bold=False):
         # Fixed-width mauve label, then the colored value. An empty label gives
         # a blank, colon-less continuation line for extra converted zones.
@@ -622,26 +1018,42 @@ def main():
             f"{paint(value, value_color, bold=bold)}"
         )
 
+    def block(when, title=None):
+        if title:
+            print()
+            print(paint(f"  {title}", "peach", bold=True))
+        row("Entered time", fmt_dt(when), "sky")
+        conversions = [(target, when.astimezone(target)) for target in targets]
+        # Pad the timestamps to a common width so the [zone] tags line up when
+        # several zones are converted at once (%Z varies: JST, GMT+3, +0530, ...).
+        width = max(len(fmt_dt(converted)) for _, converted in conversions)
+        for index, (target, converted) in enumerate(conversions):
+            row(
+                "Converted to" if index == 0 else "",
+                f"{fmt_dt(converted):<{width}}   [{target.key}]",
+                "green",
+                bold=True,
+            )
+        row("UTC", fmt_dt(when.astimezone(UTC)), "teal")
+        row("Epoch seconds", epoch_str(when), "peach")
+        row("Relative", human_delta(when), "yellow")
+
     print()
     print(paint("  Timezone Conversion  ", "mauve", bold=True))
     print(paint("  " + "-" * 21, "surface"))
     row("Input string", raw, "text", bold=True)
-    print(f"{'':<13} {paint('  -> ' + note, 'subtext')}")
-    row("Entered time", entered.strftime(fmt), "sky")
-    # Pad the timestamps to a common width so the [zone] tags line up when
-    # several zones are converted at once (%Z varies: JST, GMT+3, +0530, ...).
-    width = max(len(converted.strftime(fmt)) for _, converted in conversions)
-    for index, (target, converted) in enumerate(conversions):
-        row(
-            "Converted to" if index == 0 else "",
-            f"{converted.strftime(fmt):<{width}}   [{target.key}]",
-            "green",
-            bold=True,
-        )
-    row("UTC", entered.astimezone(UTC).strftime(fmt), "teal")
-    row("Epoch seconds", str(int(entered.timestamp())), "peach")
-    row("Relative", human_delta(entered), "yellow")
+    for note in parsed.notes:
+        print(f"{'':<13} {paint('  -> ' + note, 'subtext')}")
+    for warning in warnings:
+        print(f"{'':<13} {paint('  !! ' + warning, 'red', bold=True)}")
+    block(entered)
+    if parsed.alternative:
+        label, alt = parsed.alternative
+        block(alt, f"{label} reading")
     print()
+
+    if args.strict and warnings:
+        sys.exit(3)
 
 
 if __name__ == "__main__":
