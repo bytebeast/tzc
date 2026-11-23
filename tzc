@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-tzconvert.py
-============
+tzc
+===
 
 Interactively:
   1. Ask you for a date/time string (auto-detects ~10 common formats).
@@ -20,6 +20,7 @@ Recognized input formats
   1721831718                       Unix epoch seconds
   1721831718123                    Unix epoch milliseconds
   1721831718123456789              Unix epoch nanoseconds
+  20260724                         compact date YYYYMMDD        (naive; 20260724.0 = epoch)
   24/Jul/2026:14:35:18 +0000       Apache / Nginx access log
   07/24/2026 14:35[:18]            US-style numeric date        (DD/MM with --day-first)
   31 days, 4 hours, 25 minutes ago human-readable relative time (past)
@@ -43,6 +44,7 @@ Warnings (printed with !!, and exit status 3 under --strict)
   * an ambiguous abbreviation (CST, IST, BST), or one that does not match the
     date (e.g. "CST" in October, when US Central is on CDT)
   * an ambiguous numeric date such as 03/04/2026
+  * an 8-digit number such as 20260724, read as a date but also valid epoch seconds
 
 Converting to several timezones at once
 ---------------------------------------
@@ -438,16 +440,20 @@ def parse_relative(s, now):
             return None  # an unrecognized unit means this isn't a clean relative expr
         total += float(num) * _REL_UNIT_SECONDS[unit]
 
-    # With no explicit direction, only accept if the whole string was relative
-    # tokens (plus commas / "and" / whitespace); otherwise defer to other parsers.
+    # Only accept if the whole string was relative tokens (plus commas / "and" /
+    # whitespace); otherwise defer to other parsers.
+    leftover = _REL_TOKEN.sub("", text).replace(",", " ").replace(" and ", " ")
+    if leftover.strip():
+        return None
     if future is None:
-        leftover = _REL_TOKEN.sub("", text).replace(",", " ").replace(" and ", " ")
-        if leftover.strip():
-            return None
         future = False  # default to "ago"
 
-    dt = now + timedelta(seconds=total) if future else now - timedelta(seconds=total)
-    return dt, f"parsed as relative time ({human_delta(dt, now)})"
+    # Do the arithmetic in UTC: on a ZoneInfo datetime, +/- timedelta moves the
+    # wall clock, so "24 hours ago" across a DST change would be 23 or 25 hours.
+    utc_now = now.astimezone(UTC)
+    span = timedelta(seconds=total)
+    dt = utc_now + span if future else utc_now - span
+    return dt.astimezone(now.tzinfo), f"parsed as relative time ({human_delta(dt, utc_now)})"
 
 
 # Epoch magnitude thresholds by digit length of the integer part.
@@ -576,6 +582,21 @@ def parse_datetime(s, default_tz, day_first=False, now=None):
     s = s.strip()
     now = now or datetime.now(UTC)
 
+    # 0) Compact date (YYYYMMDD)? As epoch seconds it would be a moment in
+    #    1970-73, which nobody is likely to paste, so prefer the date but warn.
+    #    A fractional value ("20260724.0") still forces the epoch reading.
+    if re.fullmatch(r"(19|20)\d{6}", s):
+        try:
+            dt = datetime(int(s[:4]), int(s[4:6]), int(s[6:]))
+        except ValueError:
+            pass  # not a real date (month 13, Feb 30): fall through to epoch
+        else:
+            warning = (
+                f"'{s}' read as the date {dt:%Y-%m-%d}; as Unix epoch seconds it "
+                f"would be {fmt_dt(_parse_epoch(s))}. Append .0 to read it that way."
+            )
+            return _finish_naive(dt, default_tz, ["read as YYYYMMDD"], [warning])
+
     # 1) Epoch?
     epoch = _parse_epoch(s)
     if epoch is not None:
@@ -627,11 +648,12 @@ def parse_datetime(s, default_tz, day_first=False, now=None):
         # Inject a year for year-less formats. This both fills in the missing
         # year AND avoids the Python 3.15 DeprecationWarning about parsing a
         # day-of-month with no year. Try this year first; if that lands in the
-        # future (a Dec 31 log line read on Jan 1) or is invalid (Feb 29), use
-        # the year before.
+        # future (a Dec 31 log line read on Jan 1) or is invalid (Feb 29), walk
+        # back a year at a time. Eight years covers Feb 29 across a skipped
+        # century leap day (2096 -> 2104).
         use_fmt = ("%Y " + fmt) if yearless else fmt
         local_now = now.astimezone(default_tz)
-        years = [local_now.year, local_now.year - 1] if yearless else [None]
+        years = range(local_now.year, local_now.year - 9, -1) if yearless else [None]
         for year in years:
             use_str = f"{year} {norm}" if yearless else norm
             try:
@@ -652,7 +674,8 @@ def parse_datetime(s, default_tz, day_first=False, now=None):
                 extra.append(f"year assumed = {dt.year} (current year)")
             else:
                 extra.append(
-                    f"year assumed = {dt.year} (current year would be in the future)"
+                    f"year assumed = {dt.year} (latest year where the date is valid "
+                    "and not in the future)"
                 )
         if dt.tzinfo is None:
             return _finish_naive(dt, default_tz, notes + extra, [])
@@ -915,10 +938,12 @@ def epoch_str(dt):
     """Exact Unix epoch seconds for an aware datetime, with any fraction."""
     delta = dt - EPOCH
     micros = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
-    whole, frac = divmod(micros, 1_000_000)
+    # divmod on the magnitude: flooring a negative value would turn -0.5 into -1.5.
+    sign = "-" if micros < 0 else ""
+    whole, frac = divmod(abs(micros), 1_000_000)
     if not frac:
-        return str(whole)
-    text = f"{whole}.{frac:06d}".rstrip("0")
+        return f"{sign}{whole}"
+    text = f"{sign}{whole}.{frac:06d}".rstrip("0")
     return text
 
 
@@ -994,6 +1019,10 @@ def main():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    except OverflowError:
+        # timedelta/datetime raise this for huge epochs or relative spans.
+        print(f"Error: {raw!r} is outside the supported date range", file=sys.stderr)
+        sys.exit(1)
     entered = parsed.dt
     warnings = list(parsed.warnings)
     naive = any(n.startswith("naive input") for n in parsed.notes)
@@ -1057,4 +1086,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except EOFError:  # Ctrl-D or closed stdin at one of the prompts
+        print("\nError: no input given", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        sys.exit(130)
