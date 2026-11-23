@@ -92,7 +92,7 @@ except ImportError:  # Python < 3.9
 import os
 
 __author__ = "github.com/bytebeast"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 # ============================================================
 # Catppuccin (Mocha) color scheme
