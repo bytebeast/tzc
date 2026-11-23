@@ -193,6 +193,18 @@ def test_fmt_dt_and_epoch_str_show_fractions():
     assert tzc.epoch_str(dt.replace(microsecond=0)) == "1791642900"
 
 
+@pytest.mark.parametrize(
+    "offset,expected",
+    [
+        (timedelta(milliseconds=-500), "-0.5"),
+        (timedelta(seconds=-1, milliseconds=-500), "-1.5"),
+        (timedelta(seconds=-2), "-2"),
+    ],
+)
+def test_epoch_str_negative_fractions(offset, expected):
+    assert tzc.epoch_str(tzc.EPOCH + offset) == expected
+
+
 # ----------------------------------------------------------- slash dates
 
 
@@ -246,9 +258,37 @@ def test_yearless_jan_first_read_on_new_years_day():
     assert parse("Dec 31 23:59:00", now=now).dt.year == 2026
 
 
-def test_yearless_feb_29_falls_back_to_leap_year():
-    now = datetime(2025, 3, 1, tzinfo=UTC)
+@pytest.mark.parametrize(
+    "now",
+    [
+        datetime(2025, 3, 1, tzinfo=UTC),
+        datetime(2026, 10, 10, tzinfo=UTC),  # two years past the leap year
+        datetime(2028, 1, 15, tzinfo=UTC),  # leap year, but Feb 29 still ahead
+    ],
+)
+def test_yearless_feb_29_falls_back_to_leap_year(now):
     assert parse("Feb 29 10:00:00", now=now).dt.year == 2024
+
+
+# ------------------------------------------------------- compact YYYYMMDD
+
+
+def test_compact_date_reads_as_date_and_warns():
+    p = parse("20260724")
+    assert p.dt.replace(tzinfo=None) == datetime(2026, 7, 24)
+    assert p.dt.tzinfo is LA
+    assert len(p.warnings) == 1 and "epoch" in p.warnings[0]
+
+
+def test_compact_date_with_fraction_forces_epoch():
+    p = parse("20260724.0")
+    assert p.dt == datetime(1970, 8, 23, 11, 58, 44, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("value", ["12345678", "20261301", "20260230"])
+def test_eight_digits_that_are_not_a_date_stay_epoch(value):
+    p = parse(value)
+    assert p.dt.tzinfo is UTC and p.warnings == []
 
 
 # ------------------------------------------------------- existing formats
@@ -273,6 +313,48 @@ def test_relative_time():
     assert p.dt.astimezone(UTC) == NOW - timedelta(hours=2, minutes=30)
 
 
+@pytest.mark.parametrize(
+    "value,now,expected_gap",
+    [
+        # DST ended at 02:00 local that morning: wall-clock arithmetic gave 25h.
+        ("24 hours ago", datetime(2026, 11, 1, 20, 0, tzinfo=UTC), timedelta(hours=24)),
+        # 02:30 PDT the day after spring-forward: wall-clock arithmetic landed on
+        # the nonexistent 02:30 PST and was really 23h.
+        ("1 day ago", datetime(2026, 3, 9, 9, 30, tzinfo=UTC), timedelta(days=1)),
+        ("in 1 day", datetime(2026, 10, 31, 19, 0, tzinfo=UTC), -timedelta(days=1)),
+    ],
+)
+def test_relative_time_is_elapsed_time_across_dst(value, now, expected_gap):
+    p = parse(value, now=now)
+    assert now - p.dt == expected_gap
+    assert p.dt.tzinfo is LA
+
+
+@pytest.mark.parametrize(
+    "value", ["in 3 hours blah", "garbage 5 m ago", "x 1 day from now"]
+)
+def test_relative_with_trailing_junk_is_rejected(value):
+    with pytest.raises(ValueError):
+        parse(value)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("in 3 hours, 12 minutes", timedelta(hours=-3, minutes=-12)),
+        ("5 minutes from now", timedelta(minutes=-5)),
+        ("1 hour and 5 minutes ago", timedelta(hours=1, minutes=5)),
+    ],
+)
+def test_relative_with_direction_markers_still_parses(value, expected):
+    assert NOW - parse(value).dt == expected
+
+
+def test_relative_note_matches_real_gap_across_dst():
+    p = parse("24 hours ago", now=datetime(2026, 11, 1, 20, 0, tzinfo=UTC))
+    assert "(1 day ago)" in p.notes[0]
+
+
 def test_parsed_still_unpacks_as_pair():
     dt, note = parse("2026-07-24T14:35:18Z")
     assert dt.tzinfo is not None and "explicit" in note
@@ -293,7 +375,19 @@ def run_cli(*args, tz="America/Los_Angeles"):
         capture_output=True,
         text=True,
         env=env,
+        # Never let a prompt block on the terminal pytest was started from.
+        stdin=subprocess.DEVNULL,
     )
+
+
+def test_cli_eof_at_prompt_is_a_clean_error():
+    r = run_cli("--to", "UTC")
+    assert r.returncode == 1 and "Error: no input given" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_help_names_the_script():
+    assert run_cli("--help").stdout.split("\n\n")[1].startswith("tzc\n")
 
 
 def test_cli_shows_both_readings_for_overlap():
@@ -312,6 +406,16 @@ def test_cli_strict_exit_code():
 def test_cli_bad_from_zone_is_a_clean_error():
     r = run_cli("--from", "Not/AZone", "--to", "UTC", "2026-01-01 00:00:00")
     assert r.returncode == 1 and "Unknown timezone" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["99999999999 seconds ago", "9999999999999999 years ago", "9" * 21],
+)
+def test_cli_out_of_range_relative_is_a_clean_error(value):
+    r = run_cli("--to", "UTC", value)
+    assert r.returncode == 1 and r.stderr.startswith("Error:")
     assert "Traceback" not in r.stderr
 
 

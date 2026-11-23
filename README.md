@@ -282,6 +282,7 @@ share it), and you are done.
 | `1721831718`                       | Unix epoch seconds                             |
 | `1721831718123`                    | Unix epoch milliseconds                        |
 | `1721831718123456789`              | Unix epoch nanoseconds                         |
+| `20260724`                         | Compact date YYYYMMDD (`20260724.0` = epoch)   |
 | `24/Jul/2026:14:35:18 +0000`       | Apache / Nginx access log                      |
 | `07/24/2026 14:35:18`              | Numeric date (MM/DD; DD/MM with `--day-first`) |
 | `31 days, 4 hours, 25 minutes ago` | Human-readable relative time                   |
@@ -306,6 +307,7 @@ answer might be wrong:
 | Ambiguous abbreviation          | `CST`, `IST`, `BST`                     | Names the other meanings; use an offset or `--from`                  |
 | Abbreviation wrong for the date | `CST` in October (US Central is on CDT) | Suggests the source was mislabeled                                   |
 | Ambiguous numeric date          | `03/04/2026`                            | Reads MM/DD unless `--day-first`                                     |
+| Ambiguous 8-digit number        | `20260724`                              | Reads YYYYMMDD; append `.0` for epoch seconds                        |
 | Local zone unknown              | `$TZ` set to a POSIX rule string        | Says naive times use today's fixed offset                            |
 
 ---
