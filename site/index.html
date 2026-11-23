@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tzc · paste a timestamp, get your time</title>
+<meta name="description" content="Copy a timestamp straight out of a log, paste it into tzc, and see what time that was for you and your whole team, plus how long ago it happened.">
+<meta property="og:title" content="tzc">
+<meta property="og:description" content="Paste a timestamp, get your time. No timezone math in your head.">
+<meta property="og:image" content="https://raw.githubusercontent.com/bytebeast/tzc/main/images/tzc-social-preview.png">
+<meta name="theme-color" content="#11111b">
+<style>
+  /* Catppuccin Mocha, the same palette the CLI uses */
+  :root {
+    --crust: #11111b; --mantle: #181825; --base: #1e1e2e;
+    --surface0: #313244; --surface1: #45475a; --surface2: #585b70; --overlay0: #6c7086;
+    --subtext0: #a6adc8; --text: #cdd6f4;
+    --blue: #89b4fa; --lavender: #b4befe; --sky: #89dceb; --teal: #94e2d5;
+    --green: #a6e3a1; --yellow: #f9e2af; --peach: #fab387; --red: #f38ba8;
+    --mauve: #cba6f7; --maroon: #eba0ac;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --wrap: min(100vw - 32px, 1240px);
+    --termw: min(var(--wrap), 980px);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--crust);
+    color: var(--text);
+    font: 16px/1.6 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(900px 500px at 15% -10%, rgb(203 166 247 / .13), transparent 70%),
+      radial-gradient(800px 500px at 90% 0%, rgb(148 226 213 / .10), transparent 70%),
+      linear-gradient(rgb(205 214 244 / .025) 1px, transparent 1px) 0 0 / 40px 40px,
+      linear-gradient(90deg, rgb(205 214 244 / .025) 1px, transparent 1px) 0 0 / 40px 40px;
+  }
+  a { color: inherit; text-decoration: none; }
+  code { font-family: var(--mono); }
+  .wrap { width: var(--wrap); margin: 0 auto; }
+
+  nav { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
+  .logo { font: 600 15px var(--mono); display: flex; align-items: center; gap: 10px; }
+  .logo i { width: 10px; height: 10px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px var(--green); }
+  nav ul { display: flex; gap: 28px; list-style: none; font-size: 14px; color: var(--subtext0); }
+  nav ul a:hover { color: var(--text); }
+
+  header { text-align: center; padding: 64px 0 48px; }
+  .pill {
+    display: inline-flex; gap: 10px; padding: 6px 14px; border-radius: 999px;
+    border: 1px solid var(--surface0); background: rgb(24 24 37 / .7);
+    font: 12px var(--mono); color: var(--subtext0);
+  }
+  .pill b { color: var(--mauve); font-weight: 500; }
+  h1 {
+    font-size: clamp(38px, 6.4vw, 76px); line-height: 1.04; letter-spacing: -.035em;
+    font-weight: 750; margin: 26px 0 22px;
+  }
+  h1 span {
+    background: linear-gradient(90deg, var(--teal), var(--sky) 40%, var(--mauve));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .lede { max-width: 640px; margin: 0 auto; color: var(--subtext0); font-size: clamp(16px, 1.6vw, 19px); }
+  .lede code { color: var(--text); }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 34px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; border-radius: 10px;
+    font-size: 15px; font-weight: 600; transition: transform .15s, background .15s, border-color .15s;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.primary { background: var(--mauve); color: var(--crust); }
+  .btn.primary:hover { background: var(--lavender); }
+  .btn.ghost { border: 1px solid var(--surface1); color: var(--text); }
+  .btn.ghost:hover { border-color: var(--overlay0); }
+
+  /* Terminal */
+  .term {
+    width: var(--termw); margin: 56px auto 0; border-radius: 14px; overflow: hidden; text-align: left;
+    background: var(--mantle); border: 1px solid var(--surface0);
+    box-shadow: 0 40px 120px -30px rgb(203 166 247 / .25), 0 20px 50px -20px rgb(0 0 0 / .8);
+  }
+  .bar {
+    display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+    background: var(--crust); border-bottom: 1px solid var(--surface0);
+  }
+  .bar i { width: 12px; height: 12px; border-radius: 50%; }
+  .bar i:nth-child(1) { background: var(--red); }
+  .bar i:nth-child(2) { background: var(--yellow); }
+  .bar i:nth-child(3) { background: var(--green); }
+  .bar span { flex: 1; text-align: center; font: 12px var(--mono); color: var(--overlay0); }
+  .bar kbd {
+    font: 12px var(--mono); color: var(--crust); background: var(--peach);
+    border-radius: 6px; padding: 3px 8px; opacity: 0; transition: opacity .15s;
+  }
+  .bar kbd.on { opacity: 1; }
+  .bar button {
+    font: 12px var(--mono); color: var(--subtext0); background: none; cursor: pointer;
+    border: 1px solid var(--surface0); border-radius: 6px; padding: 3px 10px;
+  }
+  .bar button:hover { color: var(--text); border-color: var(--surface1); }
+  #screen {
+    /* The widest log line is ~99 columns; scale the font so it fits the window
+       on desktop, and scroll sideways instead of wrapping on small screens. */
+    font: clamp(10px, calc((var(--termw) - 44px) / 61), 14px)/1.6 var(--mono);
+    padding: 18px 20px 22px; height: calc(25 * 1.6em + 40px);
+    overflow-x: auto; overflow-y: hidden; white-space: pre; color: var(--text);
+  }
+  .cursor { display: inline-block; width: .6em; height: 1.15em; vertical-align: text-bottom; background: var(--text); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .b { font-weight: 700; }
+  .dim { color: var(--overlay0); }
+  .sur { color: var(--surface2); }
+  .sub { color: var(--subtext0); }
+  .lav { color: var(--lavender); }
+  .blu { color: var(--blue); }
+  .sky { color: var(--sky); } .teal { color: var(--teal); } .yel { color: var(--yellow); }
+  .pch { color: var(--peach); } .grn { color: var(--green); } .mve { color: var(--mauve); } .red { color: var(--red); }
+  .str { color: var(--green); } .flag { color: var(--sky); }
+  .sel { background: rgb(137 180 250 / .35); }
+
+  section { padding: 110px 0 0; }
+  .eyebrow { font: 12px var(--mono); color: var(--mauve); letter-spacing: .12em; text-transform: uppercase; }
+  h2 { font-size: clamp(28px, 3.6vw, 42px); letter-spacing: -.025em; line-height: 1.15; margin: 10px 0 12px; }
+  /* The heading's negative tracking crams monospace glyphs together. */
+  h2 code { color: var(--peach); font-weight: 600; letter-spacing: 0; }
+  .intro { color: var(--subtext0); max-width: 620px; margin-bottom: 44px; }
+  .intro code { color: var(--text); font-size: 14px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; }
+  .card {
+    position: relative; padding: 22px 22px 20px; border-radius: 12px;
+    background: linear-gradient(180deg, rgb(30 30 46 / .9), rgb(24 24 37 / .9));
+    border: 1px solid var(--surface0); transition: border-color .2s, transform .2s;
+  }
+  .card:hover { border-color: var(--surface1); transform: translateY(-2px); }
+  .card h3 { font-size: 16px; font-weight: 650; margin-bottom: 6px; }
+  .card p { font-size: 14px; color: var(--subtext0); line-height: 1.55; }
+  .card > code {
+    display: inline-block; margin-bottom: 14px; padding: 2px 8px; border-radius: 6px;
+    font-size: 12px; background: var(--crust); border: 1px solid var(--surface0);
+  }
+  .card p code { font-size: 13px; color: var(--text); }
+  .card:nth-child(6n+1) > code { color: var(--mauve); }
+  .card:nth-child(6n+2) > code { color: var(--teal); }
+  .card:nth-child(6n+3) > code { color: var(--blue); }
+  .card:nth-child(6n+4) > code { color: var(--peach); }
+  .card:nth-child(6n+5) > code { color: var(--green); }
+  .card:nth-child(6n+6) > code { color: var(--sky); }
+
+  .fmts {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    border: 1px solid var(--surface0); border-radius: 12px; overflow: hidden; background: var(--mantle);
+  }
+  .fmt {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+    padding: 13px 18px; border-bottom: 1px solid var(--surface0); font-size: 14px;
+  }
+  .fmt code { color: var(--green); font-size: 13.5px; white-space: nowrap; }
+  .fmt span { color: var(--subtext0); text-align: right; }
+  .fmt:nth-child(4n+1), .fmt:nth-child(4n+2) { background: rgb(30 30 46 / .6); }
+
+  .runs { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+  .run { border-radius: 12px; border: 1px solid var(--surface0); background: var(--mantle); overflow: hidden; }
+  .run h3 {
+    display: flex; justify-content: space-between; align-items: center;
+    font: 600 13px var(--mono); padding: 12px 16px; border-bottom: 1px solid var(--surface0); color: var(--subtext0);
+  }
+  .run h3 button {
+    font: 11px var(--mono); color: var(--overlay0); background: none; border: 0; cursor: pointer;
+  }
+  .run h3 button:hover { color: var(--text); }
+  .run pre { font: 13px/1.7 var(--mono); padding: 16px; overflow-x: auto; }
+  .run .c { color: var(--overlay0); }
+
+  footer {
+    margin-top: 120px; padding: 34px 0 48px; border-top: 1px solid var(--surface0);
+    display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between;
+    font-size: 14px; color: var(--overlay0);
+  }
+  footer a:hover { color: var(--text); }
+
+  @media (max-width: 640px) {
+    nav ul { gap: 18px; }
+    nav ul li:first-child { display: none; }
+    header { padding-top: 36px; }
+    .fmts { grid-template-columns: 1fr; }
+    .fmt { flex-direction: column; gap: 2px; }
+    .fmt span { text-align: left; }
+    .fmt:nth-child(4n+1), .fmt:nth-child(4n+2) { background: none; }
+    .fmt:nth-child(odd) { background: rgb(30 30 46 / .6); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .cursor { animation: none; }
+    .btn, .card, .bar kbd { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="logo" href="#"><i></i>tzc</a>
+    <ul>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#formats">Formats</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="https://github.com/bytebeast/tzc">GitHub</a></li>
+    </ul>
+  </nav>
+
+  <header>
+    <div class="pill"><b>MIT</b> · Python 3.9+ · standard library only · fzf optional</div>
+    <h1>Paste a timestamp.<br><span>Get your time.</span></h1>
+    <p class="lede">Logs are stamped in UTC. Your brain isn't. Copy a timestamp straight out of a log line, paste it into <code>tzc</code>, and see what time that was for you and everyone on your team, plus how long ago it happened.</p>
+    <div class="cta">
+      <a class="btn primary" href="#install">Get started</a>
+      <a class="btn ghost" href="https://github.com/bytebeast/tzc">View on GitHub</a>
+    </div>
+
+    <div class="term" aria-label="Animated demo: define a tzc alias for US Pacific and Bengaluru, tail a log until an error appears, copy its timestamp, and convert it with the alias">
+      <div class="bar"><i></i><i></i><i></i><span>~/services/checkout</span><kbd id="key"></kbd><button id="replay" type="button">replay</button></div>
+      <div id="screen" aria-hidden="true"></div>
+    </div>
+  </header>
+
+  <section id="features">
+    <div class="eyebrow">Features</div>
+    <h2>No timezone math in your head.</h2>
+    <p class="intro">Built for the moment you're staring at an error line at 2am. It reads whatever you copied, gets daylight saving right, and tells you when the answer might be wrong.</p>
+    <div class="grid">
+      <div class="card"><code>paste</code><h3>Paste and go</h3><p>Auto-detects about a dozen timestamp formats, so you rarely have to tell it anything about the input.</p></div>
+      <div class="card"><code>Z +02:00 PST IST</code><h3>UTC and offset aware</h3><p>Offsets and named abbreviations are understood, with a warning when one is ambiguous (<code>CST</code>, <code>IST</code>, <code>BST</code>) or wrong for the date.</p></div>
+      <div class="card"><code>DST</code><h3>Daylight saving, done right</h3><p>Naive times use your real IANA zone's rules for that date. A time skipped or repeated by a clock change is flagged and shown both ways.</p></div>
+      <div class="card"><code>1721831718123</code><h3>Epoch in any resolution</h3><p>Seconds, milliseconds, microseconds or nanoseconds, detected automatically.</p></div>
+      <div class="card"><code>"31 days ago"</code><h3>Plain-English input</h3><p>Type <code>31 days, 4 hours ago</code> or <code>in 3 hours</code> and it resolves against now.</p></div>
+      <div class="card"><code>--to A,B --to C</code><h3>Every zone at once</h3><p>Repeat <code>--to</code> or pass a comma list. One timestamp, one line per zone, ready for the postmortem timeline.</p></div>
+      <div class="card"><code>fzf</code><h3>Fuzzy zone picker</h3><p>Search the full IANA list by name, abbreviation or offset (<code>-8h</code>). <code>TAB</code> to pick several.</p></div>
+      <div class="card"><code>Relative</code><h3>How long ago</h3><p>Every result ends with a friendly <code>31 days, 4 hours ago</code>, so you know if it's the incident or last month's noise.</p></div>
+      <div class="card"><code>alias</code><h3>Alias friendly</h3><p><code>--to</code> skips the picker, so your usual zones, or your whole team, are one short word away.</p></div>
+      <div class="card"><code>--strict</code><h3>Script safe</h3><p>Exits <code>3</code> when the result carries a warning, so a script never trusts a guess.</p></div>
+      <div class="card"><code>--from --day-first</code><h3>Tell it what it can't know</h3><p>Pick the zone for naive timestamps, and read <code>03/04/2026</code> as DD/MM instead of MM/DD.</p></div>
+      <div class="card"><code>catppuccin</code><h3>Readable output</h3><p>Catppuccin Mocha colors in the terminal. Auto-off when piped or when <code>NO_COLOR</code> is set.</p></div>
+      <div class="card"><code>stdlib</code><h3>One file, zero deps</h3><p>A single Python script on the standard library. <code>fzf</code> is optional, with a plain prompt fallback.</p></div>
+    </div>
+  </section>
+
+  <section id="formats">
+    <div class="eyebrow">Formats</div>
+    <h2>Whatever you copied, it reads.</h2>
+    <p class="intro">Naive timestamps are read in your local zone unless you pass <code>--from</code>. Fractional seconds are kept, and syslog lines with no year get the most recent year that isn't in the future.</p>
+    <div class="fmts">
+      <div class="fmt"><code>2026-07-24 14:35:18</code><span>SQL databases, apps (naive)</span></div>
+      <div class="fmt"><code>2026-07-24T14:35:18Z</code><span>APIs, Kubernetes (UTC)</span></div>
+      <div class="fmt"><code>2026-07-24T14:35:18.123Z</code><span>Cloud-native apps (UTC)</span></div>
+      <div class="fmt"><code>2026-07-24T14:35:18+02:00</code><span>ISO-8601 with offset</span></div>
+      <div class="fmt"><code>Jul 24 14:35:18</code><span>Linux syslog (year assumed)</span></div>
+      <div class="fmt"><code>Jul 24 14:35:18.123</code><span>systemd, Java (year assumed)</span></div>
+      <div class="fmt"><code>Fri Jul 24 07:19:59 UTC 2026</code><span>Unix <code>date</code> output</span></div>
+      <div class="fmt"><code>24/Jul/2026:14:35:18 +0000</code><span>Apache / Nginx access log</span></div>
+      <div class="fmt"><code>1721831718</code><span>Unix epoch seconds</span></div>
+      <div class="fmt"><code>1721831718123</code><span>Unix epoch milliseconds</span></div>
+      <div class="fmt"><code>1721831718123456789</code><span>Unix epoch nanoseconds</span></div>
+      <div class="fmt"><code>20260724</code><span>Compact YYYYMMDD (<code>20260724.0</code> = epoch)</span></div>
+      <div class="fmt"><code>07/24/2026 14:35:18</code><span>Numeric date (DD/MM with <code>--day-first</code>)</span></div>
+      <div class="fmt"><code>31 days, 4 hours, 25 minutes ago</code><span>Relative time</span></div>
+      <div class="fmt"><code>in 3 hours, 12 minutes</code><span>Relative time</span></div>
+      <div class="fmt"><code>Fri Jul 24 07:19:59 PDT 2026</code><span>A teammate's local time</span></div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="eyebrow">Install</div>
+    <h2>One file. Drop it on your <code>PATH</code>.</h2>
+    <p class="intro">Then wrap the zones you live in with an alias or two, so a conversion is one word away.</p>
+    <div class="runs">
+      <div class="run"><h3>install<button type="button">copy</button></h3><pre><span class="c"># standard library only; fzf powers the picker</span>
+curl -o tzc https://raw.githubusercontent.com/bytebeast/tzc/main/tzc
+chmod +x tzc
+mv tzc ~/.local/bin/
+brew install fzf</pre></div>
+      <div class="run"><h3>aliases<button type="button">copy</button></h3><pre><span class="c"># ~/.zshrc or ~/.bashrc</span>
+alias tzblr='tzc --to Asia/Kolkata'
+alias tzteam='tzc --to America/Los_Angeles,Europe/London,Asia/Kolkata'</pre></div>
+      <div class="run"><h3>clipboard<button type="button">copy</button></h3><pre><span class="c"># convert whatever you just copied (macOS)</span>
+tzall() { tzc "$(pbpaste)" --to America/Los_Angeles,Asia/Kolkata; }</pre></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>tzc · MIT licensed · by bytebeast</span>
+    <span><a href="https://github.com/bytebeast/tzc#readme">Docs</a> · <a href="https://github.com/bytebeast/tzc/issues">Issues</a> · <a href="https://github.com/bytebeast/tzc/blob/main/CHANGELOG.md">Changelog</a></span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const screen = document.getElementById("screen");
+  const key = document.getElementById("key");
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Sample log, not a real capture. Each line is stamped with the visitor's
+  // clock as it prints, so the tzc output below is a real conversion.
+  //   delay before the line (ms), level, service, message
+  const LOG = [
+    [500, "INFO ", "http", "GET /healthz 200 1ms"],
+    [900, "INFO ", "checkout", "order=A-1042 created cart_total=129.00 USD"],
+    [400, "INFO ", "payments", "authorizing card order=A-1042"],
+    [1100, "WARN ", "payments", "card-gateway slow to respond, retrying attempt=2"],
+    [1300, "ERROR", "payments", "charge failed: card-gateway connection reset order=A-1042"],
+    [350, "INFO ", "http", "POST /v1/checkout 502 2431ms"],
+  ];
+  const LEVEL = { "INFO ": "blu", "WARN ": "yel", "ERROR": "red b" };
+  const ZONES = ["America/Los_Angeles", "Asia/Kolkata"];
+
+  const ALIAS = [["alias ", ""], ["tzc=", ""], ["'tzc --to America/Los_Angeles,Asia/Kolkata'", "str"], ["  # US/Pacific + Bengaluru", "dim"]];
+  const TAIL = [["tail ", ""], ["-f ", "flag"], ["/var/log/checkout/api.log", ""]];
+
+  // Same output as fmt_dt() in tzc: '2026-11-23 09:42:07.318 PST (-0800)'.
+  // Intl gives the wall clock; the offset falls out of comparing it with UTC.
+  const fmts = {};
+  function fmtDt(date, zone) {
+    fmts[zone] ||= new Intl.DateTimeFormat("en-US", {
+      timeZone: zone, hourCycle: "h23", year: "numeric", month: "2-digit",
+      day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    const p = Object.fromEntries(fmts[zone].formatToParts(date).map(x => [x.type, x.value]));
+    const ms = date.getUTCMilliseconds();
+    const off = Math.round((Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - (date - ms)) / 60000);
+    const a = Math.abs(off);
+    const z = (off < 0 ? "-" : "+") + String(Math.floor(a / 60)).padStart(2, "0") + String(a % 60).padStart(2, "0");
+    // Intl would say "GMT+5:30" for Kolkata; tzc prints the tzdata abbreviation.
+    const abbr = zone === "UTC" ? "UTC" : zone === "Asia/Kolkata" ? "IST" : off === -420 ? "PDT" : "PST";
+    const frac = ms ? "." + String(ms).padStart(3, "0") : "";
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}${frac} ${abbr} (${z})`;
+  }
+
+  // Same as epoch_str(): whole seconds, fraction with trailing zeros dropped.
+  function epochStr(date) {
+    const t = date.getTime(), ms = t % 1000;
+    return Math.floor(t / 1000) + (ms ? "." + String(ms).padStart(3, "0").replace(/0+$/, "") : "");
+  }
+
+  // Same as human_delta(): the three most significant non-zero units.
+  function humanDelta(then) {
+    let s = Math.round((Date.now() - then) / 1000);
+    if (s < 1) return "just now";
+    const parts = [];
+    for (const [name, size] of [["year", 31536000], ["day", 86400], ["hour", 3600], ["minute", 60], ["second", 1]]) {
+      const q = Math.floor(s / size);
+      s %= size;
+      if (q) parts.push(`${q} ${name}${q !== 1 ? "s" : ""}`);
+    }
+    return parts.slice(0, 3).join(", ") + " ago";
+  }
+
+  let line, timer = 0, run = 0;
+  const cursor = document.createElement("span");
+  cursor.className = "cursor";
+
+  function newLine() {
+    line = document.createElement("div");
+    screen.appendChild(line);
+    line.appendChild(cursor);
+    screen.scrollTop = screen.scrollHeight;
+  }
+  function put(text, cls) {
+    const s = document.createElement("span");
+    if (cls) s.className = cls;
+    s.textContent = text;
+    line.insertBefore(s, cursor);
+    return s;
+  }
+  function flash(label) {
+    key.textContent = label;
+    key.classList.add("on");
+    setTimeout(() => key.classList.remove("on"), 900);
+  }
+
+  // A tiny scheduler so a replay can cancel everything queued by the last run.
+  const sleep = ms => new Promise((res, rej) => {
+    const id = run;
+    setTimeout(() => (id === run ? res() : rej()), reduced ? 0 : ms);
+  });
+
+  async function type(parts) {
+    for (const [text, cls] of parts) {
+      if (reduced) { put(text, cls); continue; }
+      for (const ch of text) { put(ch, cls); await sleep(18 + Math.random() * 30); }
+    }
+  }
+  async function prompt(parts) {
+    put("$ ", "grn");
+    await sleep(500);
+    await type(parts);
+    await sleep(350);
+    newLine();
+  }
+
+  // Returns the timestamp's characters as separate spans so they can be
+  // "selected" one at a time, like a mouse drag.
+  function logLine([, level, svc, msg]) {
+    const ts = new Date();
+    const chars = [...ts.toISOString()].map(ch => put(ch, "dim"));
+    put(" ");
+    put(level, LEVEL[level]);
+    put(" [");
+    put(svc, "lav");
+    put("] ");
+    put(msg, level === "ERROR" ? "red" : "sub");
+    newLine();
+    return { ts, chars };
+  }
+
+  function row(label, value, cls) {
+    newLine();
+    put(label.padEnd(13), "mve");
+    put(label ? ":" : " ", "sur");
+    put(" ");
+    put(value, cls);
+  }
+
+  async function tzcOutput(raw, when) {
+    const out = [
+      () => newLine(),
+      () => { newLine(); put("  Timezone Conversion  ", "mve b"); },
+      () => { newLine(); put("  " + "-".repeat(21), "sur"); },
+      () => row("Input string", raw, "b"),
+      () => { newLine(); put(" ".repeat(14)); put("  -> parsed with explicit timezone", "sub"); },
+      () => row("Entered time", fmtDt(when, "UTC"), "sky"),
+    ];
+    const conv = ZONES.map(z => fmtDt(when, z));
+    const width = Math.max(...conv.map(c => c.length));
+    conv.forEach((c, i) => out.push(() => row(i ? "" : "Converted to", `${c.padEnd(width)}   [${ZONES[i]}]`, "grn b")));
+    out.push(
+      () => row("UTC", fmtDt(when, "UTC"), "teal"),
+      () => row("Epoch seconds", epochStr(when), "pch"),
+      () => row("Relative", humanDelta(when), "yel"),
+      () => newLine(),
+    );
+    for (const step of out) { step(); await sleep(22); }
+  }
+
+  async function play() {
+    run++;
+    clearTimeout(timer);
+    screen.textContent = "";
+    key.classList.remove("on");
+    newLine();
+    try {
+      await sleep(600);
+      await prompt(ALIAS);
+      await prompt(TAIL);
+
+      let err;
+      for (const entry of LOG) {
+        await sleep(entry[0]);
+        const logged = logLine(entry);
+        if (entry[1] === "ERROR") err = logged;
+      }
+
+      await sleep(1000);
+      for (const ch of err.chars) { ch.classList.add("sel"); await sleep(26); }
+      await sleep(250);
+      flash("⌘C");
+      await sleep(900);
+      put("^C");
+      newLine();
+
+      const raw = err.ts.toISOString();
+      put("$ ", "grn");
+      await sleep(700);
+      await type([["tzc ", ""], ['"', "str"]]);
+      await sleep(250);
+      flash("⌘V");
+      put(raw, "str");
+      await sleep(300);
+      await type([['"', "str"]]);
+      await sleep(400);
+      await tzcOutput(raw, err.ts);
+
+      newLine();
+      put("$ ", "grn");
+      if (!reduced) timer = setTimeout(play, 9000);
+    } catch { /* superseded by a replay */ }
+  }
+
+  document.getElementById("replay").addEventListener("click", play);
+
+  // Start when the terminal scrolls into view, so the run isn't half over.
+  new IntersectionObserver((entries, obs) => {
+    if (entries[0].isIntersecting) { obs.disconnect(); play(); }
+  }, { threshold: 0.3 }).observe(screen);
+
+  document.querySelectorAll(".run button").forEach(b => b.addEventListener("click", () => {
+    const text = [...b.closest(".run").querySelector("pre").childNodes]
+      .filter(n => !(n.classList && n.classList.contains("c"))).map(n => n.textContent).join("").trim();
+    navigator.clipboard.writeText(text).then(() => {
+      b.textContent = "copied";
+      setTimeout(() => (b.textContent = "copy"), 1500);
+    });
+  }));
+})();
+</script>
+</body>
+</html>

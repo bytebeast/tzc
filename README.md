@@ -13,6 +13,10 @@
   <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-a6e3a1?style=flat-square">
 </p>
 
+<p align="center">
+  <a href="https://bytebeast.github.io/tzc/"><b>bytebeast.github.io/tzc</b></a> · see it run live
+</p>
+
 <p align="center"><b>Paste a timestamp, get your local time. Nothing else to think about.</b></p>
 
 ---
